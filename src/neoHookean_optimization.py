@@ -95,10 +95,19 @@ class NeoHookeanTopoOpt(NeoHookean):
                 dl,  # Tangent matrix * dl
             )
         )
+        # No values at DirichletBC boundaries
         bcs = [
             fe.DirichletBC(self.V_u, fe.Constant([0.0] * len(val)), key)
             for key, val in self.params.dirichlet_bcs_dict.items()
-        ]  # No values at DirichletBC boundaries
+        ]
+        if self.params.dirichlet_bcs is not None:
+            bcs += [
+                fe.DirichletBC(
+                    self.V_u, fe.Constant([0.0] * len(val)), self.boundaries, key
+                )
+                for key, val in self.params.dirichlet_bcs
+            ]
+
         solver = fe.LUSolver("default")
         for bc in bcs:
             bc.apply(lhs)
