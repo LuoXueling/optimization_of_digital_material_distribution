@@ -6,6 +6,8 @@ import shutil
 from src.utils import log
 from functools import partial
 from datetime import datetime
+import numpy as np
+import matplotlib.pyplot as plt
 
 
 class NeoHookean:
@@ -106,6 +108,23 @@ class NeoHookean:
         )  # Displacement from previous iteration
         # self.u.vector()[:] = 10
 
+        # Defined optimized variable
+        # https://fenicsproject.discourse.group/t/how-to-modify-the-value-of-a-function-object/4890
+        self.e = fe.Function(self.V_e, name="Optimized")
+        self.e.vector()[:] = 1
+        self.gradient = fe.Function(self.V_e, name="Gradient")
+        # self.e = E
+        # Or set values by the following methods
+        # e.vector().set_local(my_values)
+        # e.interpolate(fe.Expression("(x[0]-width/2)*0.2+10", width=width, degree=1), M)
+
+        # Initialize optimization related variables
+        self._optimize_step = 0
+        self._loss_history = []
+        self._stage_loss_history = []
+
+        self.optimized = False
+
     def _initialize(self):
         self.u = fe.Function(self.V_u, name="displacement")
 
@@ -127,11 +146,134 @@ class NeoHookean:
         # Solve variational problem
         fe.solve(F == 0, self.u, self.dirichlet_bcs, J=J)
 
-    def eval(self, x):
+    def _objective_function(self):
         raise NotImplementedError()
 
-    def grad(self, x):
+    def _set_optimized_variable(self, x: np.ndarray):
+        self.e.vector()[:] = x
+
+    def _bounds(self):
         raise NotImplementedError()
+
+    def _initial_values(self):
+        raise NotImplementedError()
+
+    def eval(self, x):
+        self.log(f"Taking input: min={np.min(x)}, max={np.max(x)}")
+        self._set_optimized_variable(x)
+        # Solve \partial L/\partial \lambda = 0, i.e. the governing equation it self
+        self.log("Solving forward problem")
+        try:
+            self.forward()
+        except:
+            self._initialize()
+            return np.inf
+        loss = fe.assemble(self._objective_function())
+        self.log(f"Loss: {loss}")
+        return loss
+
+    def grad(self, x):
+        self.log("Solving gradient")
+        self._set_optimized_variable(x)
+        # Solve \partial L/\partial u = 0 for \lambda. It's a linear equation.
+        j = self._objective_function()
+        dj_du = fe.assemble(fe.derivative(j, self.u, self.v))
+        rhs = -dj_du
+        lagrangian = fe.Function(
+            self.V_u
+        )  # Lagrangian multipliers share the same space as u
+        dl = fe.TrialFunction(self.V_u)
+        Pi = self._potential_energy()
+        lhs = fe.assemble(
+            fe.derivative(
+                fe.derivative(
+                    fe.derivative(
+                        Pi, self.u, lagrangian
+                    ),  # Derivative of potential energy w.r.t. u and inner product with lagrangian
+                    self.u,
+                    self.v,
+                ),  # Derivative w.r.t. u
+                lagrangian,
+                dl,  # Tangent matrix * dl
+            )
+        )
+        # No values at DirichletBC boundaries
+        bcs = [
+            fe.DirichletBC(self.V_u, fe.Constant([0.0] * len(val)), key)
+            for key, val in self.params.dirichlet_bcs_dict.items()
+        ]
+        if self.params.dirichlet_bcs is not None:
+            bcs += [
+                fe.DirichletBC(
+                    self.V_u, fe.Constant([0.0] * len(val)), self.boundaries, key
+                )
+                for key, val in self.params.dirichlet_bcs
+            ]
+
+        solver = fe.LUSolver("default")
+        for bc in bcs:
+            bc.apply(lhs)
+            bc.apply(rhs)
+        solver.solve(lhs, lagrangian.vector(), rhs)
+        # self.log(np.sum(np.abs(np.array(lagrangian.vector()))))
+
+        # Compute \partial L/\partial param
+        v_e = fe.TestFunction(self.V_e)
+        dj_dp = fe.assemble(fe.derivative(j, self.e, v_e))
+        dfl_dp = fe.assemble(
+            fe.derivative(fe.derivative(Pi, self.u, lagrangian), self.e, v_e)
+        )
+        grad = dj_dp + dfl_dp
+        self.gradient.vector()[:] = grad
+        return grad.get_local()
+
+    def optimize(self):
+        x0 = self._initial_values()
+        x = x0
+        self._set_optimized_variable(x0)
+
+        for i in range(self.params.maxiter):
+            print()
+            self.log(f"----- Iteration {i} -----")
+            res = self.eval(x)
+            self._loss_history.append(res)
+            self._stage_loss_history.append(res)
+            grad = self.grad(x)
+            x -= self.params.lr * grad
+            for i, bound in zip(range(len(x)), self._bounds()):
+                if bound[0] is not None:
+                    x[i] = max(bound[0], x[i])
+                if bound[1] is not None:
+                    x[i] = min(bound[1], x[i])
+            self.optimized = True
+            terminate = self._optimize_callback()
+            if terminate:
+                break
+
+        plt.figure(figsize=(4, 3), dpi=300)
+        ax = plt.subplot(111)
+        ax.plot(np.arange(len(self._loss_history)), self._loss_history)
+        ax.set_xlabel("Iteration")
+        ax.set_ylabel("Loss")
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.path, "loss.pdf"))
+
+    def _optimize_callback(self, *args) -> bool:
+        # self._initialize()
+        if self._optimize_step % self.params.output_per_step == 0:
+            self.save(time=self._optimize_step)
+        self._optimize_step += 1
+        if len(self._loss_history) > 1 and (
+            0
+            < (1 - self._loss_history[-1] / self._loss_history[-2])
+            < self.params.relative_tol
+            or (
+                len(self._stage_loss_history) > 10
+                and self._stage_loss_history[-10] == min(self._stage_loss_history[-10:])
+            )
+        ):
+            return True
+        return False
 
     def _strain_energy_density(self, F=None, C=None, Eps=None):
         to_3d = lambda x: (
@@ -213,12 +355,12 @@ class NeoHookean:
         sigma = fe.diff(psi, e)
         return sigma
 
-    def optimize(self):
-        raise NotImplementedError()
-
     def save(self, time=0):
         # Save solution in XDMF format
         self.xdmffile.write(self.u, time)
+        if self.optimized:
+            self.xdmffile.write(self.e, time)
+            self.xdmffile.write(self.gradient, time)
 
         # For tensors
         tensor_space = fe.TensorFunctionSpace(self.mesh, "DG", 0)
@@ -234,3 +376,12 @@ class NeoHookean:
         psi = fe.project(self._strain_energy_density(), scalar_space)
         psi.rename("strain_energy_density", "(No description)")
         self.xdmffile.write(psi, time)
+
+        if self.optimized:
+            e_projected = fe.project(self.e, scalar_space)
+            e_projected.rename("Optimized (projected)", "(No description)")
+            self.xdmffile.write(e_projected, time)
+
+            grad_projected = fe.project(self.filtered_gradient, scalar_space)
+            grad_projected.rename("Gradient (projected)", "(No description)")
+            self.xdmffile.write(grad_projected, time)

@@ -2,7 +2,7 @@
 Downloaded from the GitHub repo: https://github.com/floiseau/msh2xdmf
 under GPL-3.0 license
 
-Modified for 2D quad elements
+Modified for 2D quad elements, but unfortunately FEniCS 2019.1 does not support importing quad mesh from this tool
 """
 
 #!/usr/bin/env python

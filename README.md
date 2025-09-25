@@ -17,8 +17,8 @@ If using VSCode to debug (with the extension `Python Debugger`), install a previ
 
 ### Implemented methods
 
-* `src/neoHookean.py` implements a neo-Hookean model as the foundation of all other implementations. 
-* `src/neoHookean_optimization.py` implements a simple implementation of adjoint-state-method-based SIMP topology optimization for a neo-Hookean model. 
+* `src/neoHookean.py` implements a neo-Hookean model and a basic optimization framework as the foundation of all other implementations. 
+* `src/neoHookean_topo_opt.py` implements a simple implementation of adjoint-state-method-based SIMP topology optimization for a neo-Hookean model. 
 
 ### Configuration and execution
 
@@ -160,7 +160,7 @@ params.update(
 The main script
 
 ```python
-from src.neoHookean_optimization import NeoHookeanTopoOpt
+from src.neoHookean_topo_opt import NeoHookeanTopoOpt
 
 problem = NeoHookeanTopoOpt(config_path="config.py")
 problem.optimize()
