@@ -1,5 +1,5 @@
 import dolfin as fe
-from utils import dotdict
+from src.utils import dotdict
 
 
 params = dotdict(
@@ -51,6 +51,7 @@ params.update(
                 (0.0, 0.0)
             ),  # Modify for 3D
         },
+        # Mark Neumann boundary subdomains and values
         neumann_bcs_dict={
             fe.CompiledSubDomain(
                 "near(x[0], side) && near(x[1], pos, length/2) && on_boundary",
@@ -67,5 +68,10 @@ params.update(
             #     (0.0001, 0.000)
             # ),  # Modify for 3D
         },
+        # An alternative to define Dirichlet/Neumann boundaries by using msh2xdmf.py
+        boundaries=None,  # boundaries is a MeshFunction with some boundaries marked for neumann bcs
+        association_table=None,  # A dict that maps boundary names to boundary id
+        neumann_bcs=None,  # a list of tuples (boundary_id, (f_x, f_y, f_z)).
+        dirichlet_bcs=None,  # a list of tuples (boundary_id, (u_x, u_y, u_z))
     )
 )
