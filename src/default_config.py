@@ -16,11 +16,6 @@ params = dotdict(
     height=1,
     mesh_size=0.02,
     # Optimization settings
-    target_volume=0.4,
-    min_density=0.001,
-    init_penalty=1.0,
-    max_penalty=4.0,
-    r_min=0.2,
     output_per_step=10,
     maxiter=10000,
     lr=1,

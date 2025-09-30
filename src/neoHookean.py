@@ -51,9 +51,27 @@ class NeoHookean:
         self.V_u = fe.VectorFunctionSpace(
             self.mesh, "Lagrange", self.params.elem_order
         )  # For displacement
+
+        # Define functions
+        self.du = fe.TrialFunction(self.V_u)  # Incremental field
+        self.u_test = fe.TestFunction(self.V_u)  # Test function
+        self.u = fe.Function(
+            self.V_u, name="displacement"
+        )  # fields from previous iteration
+        # self.u.vector()[:] = 10
+
+        # Defined optimized variable
         self.V_e = fe.FunctionSpace(
             self.mesh, "Lagrange", self.params.elem_order
         )  # For the optimized variable
+        # https://fenicsproject.discourse.group/t/how-to-modify-the-value-of-a-function-object/4890
+        self.e = fe.Function(self.V_e, name="Optimized")
+        self.e.vector()[:] = 1
+        self.gradient = fe.Function(self.V_e, name="Gradient")
+        # self.e = E
+        # Or set values by the following methods
+        # e.vector().set_local(my_values)
+        # e.interpolate(fe.Expression("(x[0]-width/2)*0.2+10", width=width, degree=1), M)
 
         # Mark Neumann boundaries
         if (
@@ -77,16 +95,7 @@ class NeoHookean:
         self.association_table = self.params.association_table
 
         # Generate Dirichlet BC
-        self.dirichlet_bcs = [
-            fe.DirichletBC(self.V_u, val, key)
-            for key, val in self.params.dirichlet_bcs_dict.items()
-        ]
-
-        if self.params.dirichlet_bcs is not None:
-            self.dirichlet_bcs += [
-                fe.DirichletBC(self.V_u, val, self.boundaries, key)
-                for key, val in self.params.dirichlet_bcs
-            ]
+        self.dirichlet_bcs = self._define_dirichlet_boundaries()
 
         self.boundary_ds = fe.ds(
             metadata={"quadrature_degree": self.params.q_deg},
@@ -99,24 +108,6 @@ class NeoHookean:
                 f"Applying Neumann boundary {i}: ({fe.assemble(val[0] * self.boundary_ds(i))}, {fe.assemble(val[1] * self.boundary_ds(i))})"
             )
 
-        # Define functions
-        self.du = fe.TrialFunction(self.V_u)  # Incremental displacement
-        self.v = fe.TestFunction(self.V_u)  # Test function
-        self.u = fe.Function(
-            self.V_u, name="displacement"
-        )  # Displacement from previous iteration
-        # self.u.vector()[:] = 10
-
-        # Defined optimized variable
-        # https://fenicsproject.discourse.group/t/how-to-modify-the-value-of-a-function-object/4890
-        self.e = fe.Function(self.V_e, name="Optimized")
-        self.e.vector()[:] = 1
-        self.gradient = fe.Function(self.V_e, name="Gradient")
-        # self.e = E
-        # Or set values by the following methods
-        # e.vector().set_local(my_values)
-        # e.interpolate(fe.Expression("(x[0]-width/2)*0.2+10", width=width, degree=1), M)
-
         # Initialize optimization related variables
         self._optimize_step = 0
         self._loss_history = []
@@ -124,23 +115,43 @@ class NeoHookean:
 
         self.optimized = False
 
-    def _initialize(self):
+    def _initialize_fields(self):
         self.u = fe.Function(self.V_u, name="displacement")
 
-    def forward(self):
-        v = self.v
-        du = self.du
+    def _define_dirichlet_boundaries(self, fixed_value=None):
+        dirichlet_bcs = [
+            fe.DirichletBC(
+                self.V_u,
+                val if fixed_value is None else fe.Constant([0.0] * len(val)),
+                key,
+            )
+            for key, val in self.params.dirichlet_bcs_dict.items()
+        ]
 
+        if self.params.dirichlet_bcs is not None:
+            dirichlet_bcs += [
+                fe.DirichletBC(
+                    self.V_u,
+                    val if fixed_value is None else fe.Constant([0.0] * len(val)),
+                    self.boundaries,
+                    key,
+                )
+                for key, val in self.params.dirichlet_bcs
+            ]
+
+        return dirichlet_bcs
+
+    def forward(self):
         psi = self._strain_energy_density()
 
         # Total potential energy
         Pi = self._potential_energy(psi=psi)
 
         # Compute first variation of Pi (directional derivative about u in the direction of v)
-        F = fe.derivative(Pi, self.u, v)
+        F = fe.derivative(Pi, self.u, self.u_test)
 
         # Compute Jacobian of F
-        J = fe.derivative(F, self.u, du)
+        J = fe.derivative(F, self.u, self.du)
 
         # Solve variational problem
         fe.solve(
@@ -171,7 +182,7 @@ class NeoHookean:
         try:
             self.forward()
         except:
-            self._initialize()
+            self._initialize_fields()
             return np.inf
         loss = fe.assemble(self._objective_function())
         self.log(f"Loss: {loss}")
@@ -182,12 +193,12 @@ class NeoHookean:
         self._set_optimized_variable(x)
         # Solve \partial L/\partial u = 0 for \lambda. It's a linear equation.
         j = self._objective_function()
-        dj_du = fe.assemble(fe.derivative(j, self.u, self.v))
+        dj_du = fe.assemble(fe.derivative(j, self.u, self.u_test))
         rhs = -dj_du
         lagrangian = fe.Function(
             self.V_u
         )  # Lagrangian multipliers share the same space as u
-        dl = fe.TrialFunction(self.V_u)
+        l_test = fe.TrialFunction(self.V_u)
         Pi = self._potential_energy()
         lhs = fe.assemble(
             fe.derivative(
@@ -196,24 +207,14 @@ class NeoHookean:
                         Pi, self.u, lagrangian
                     ),  # Derivative of potential energy w.r.t. u and inner product with lagrangian
                     self.u,
-                    self.v,
+                    self.u_test,
                 ),  # Derivative w.r.t. u
                 lagrangian,
-                dl,  # Tangent matrix * dl
+                l_test,  # Tangent matrix * l_test
             )
         )
         # No values at DirichletBC boundaries
-        bcs = [
-            fe.DirichletBC(self.V_u, fe.Constant([0.0] * len(val)), key)
-            for key, val in self.params.dirichlet_bcs_dict.items()
-        ]
-        if self.params.dirichlet_bcs is not None:
-            bcs += [
-                fe.DirichletBC(
-                    self.V_u, fe.Constant([0.0] * len(val)), self.boundaries, key
-                )
-                for key, val in self.params.dirichlet_bcs
-            ]
+        bcs = self._define_dirichlet_boundaries(fixed_value=0.0)
 
         solver = fe.LUSolver("mumps")
         for bc in bcs:
@@ -264,7 +265,7 @@ class NeoHookean:
         plt.savefig(os.path.join(self.path, "loss.pdf"))
 
     def _optimize_callback(self, *args) -> bool:
-        # self._initialize()
+        # self._initialize_fields()
         if self._optimize_step % self.params.output_per_step == 0:
             self.save(time=self._optimize_step)
         self._optimize_step += 1
