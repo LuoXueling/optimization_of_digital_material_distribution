@@ -8,6 +8,7 @@ from functools import partial
 from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
+from mpi4py import MPI
 
 
 class NeoHookean:
@@ -24,9 +25,7 @@ class NeoHookean:
         )
         os.makedirs(self.path, exist_ok=True)
         shutil.copy2(config_path, os.path.join(self.path, "config.py"))
-        self.xdmffile = fe.XDMFFile(
-            fe.MPI.comm_world, os.path.join(self.path, "out.xdmf")
-        )
+        self.xdmffile = fe.XDMFFile(MPI.COMM_WORLD, os.path.join(self.path, "out.xdmf"))
         self.xdmffile.parameters["flush_output"] = True
         self.xdmffile.parameters["functions_share_mesh"] = True
         self.xdmffile.parameters["rewrite_function_mesh"] = False
@@ -144,7 +143,13 @@ class NeoHookean:
         J = fe.derivative(F, self.u, du)
 
         # Solve variational problem
-        fe.solve(F == 0, self.u, self.dirichlet_bcs, J=J)
+        fe.solve(
+            F == 0,
+            self.u,
+            self.dirichlet_bcs,
+            J=J,
+            solver_parameters={"newton_solver": {"linear_solver": "mumps"}},
+        )
 
     def _objective_function(self):
         raise NotImplementedError()
@@ -210,7 +215,7 @@ class NeoHookean:
                 for key, val in self.params.dirichlet_bcs
             ]
 
-        solver = fe.LUSolver("default")
+        solver = fe.LUSolver("mumps")
         for bc in bcs:
             bc.apply(lhs)
             bc.apply(rhs)
