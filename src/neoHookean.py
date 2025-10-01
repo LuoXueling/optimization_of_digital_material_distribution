@@ -361,9 +361,9 @@ class NeoHookean:
         sigma = fe.diff(psi, e)
         return sigma
 
-    def save(self, time=0):
+    def save(self, main_field=None, time=0):
         # Save solution in XDMF format
-        self.xdmffile.write(self.u, time)
+        self.xdmffile.write(self.u if main_field is None else main_field, time)
         if self.optimized:
             self.xdmffile.write(self.e, time)
             self.xdmffile.write(self.gradient, time)
