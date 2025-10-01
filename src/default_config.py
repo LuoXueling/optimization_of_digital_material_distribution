@@ -64,6 +64,7 @@ params.update(
             # ),  # Modify for 3D
         },
         # An alternative to define Dirichlet/Neumann boundaries by using msh2xdmf.py
+        # This approach can be used together with dirichlet_bcs_dict and neumann_bcs_dict
         boundaries=None,  # boundaries is a MeshFunction with some boundaries marked for neumann bcs
         association_table=None,  # A dict that maps boundary names to boundary id
         neumann_bcs=None,  # a list of tuples (boundary_id, (f_x, f_y, f_z)).

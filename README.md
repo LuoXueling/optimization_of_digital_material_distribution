@@ -65,6 +65,7 @@ params.update(
         },
         neumann_bcs_dict=None,
         boundaries=boundaries,  # boundaries is a MeshFunction with some boundaries marked for neumann bcs
+        association_table=association_table,
         neumann_bcs=[
             (association_table["upper"], fe.Constant((0.0, -0.001))),
             (association_table["right"], fe.Constant((-0.001, 0.0))),

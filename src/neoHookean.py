@@ -74,28 +74,65 @@ class NeoHookean:
         # e.interpolate(fe.Expression("(x[0]-width/2)*0.2+10", width=width, degree=1), M)
 
         # Mark Neumann boundaries
-        if (
-            self.params.neumann_bcs_dict is not None
-            and self.params.neumann_bcs is not None
+        if self.params.boundaries is None and (
+            self.params.neumann_bcs is not None or self.params.dirichlet_bcs is not None
         ):
             raise Exception(
-                "Only define Neumann boundaries with either neumann_bcs_dict or boundaries & neumann_bcs"
+                "Must provide MeshFunction to params.boundaries if defining boundary conditions using boundary id"
             )
+        if (
+            (
+                self.params.neumann_bcs is not None
+                or self.params.dirichlet_bcs is not None
+            )
+            and (
+                self.params.neumann_bcs_dict is not None
+                or self.params.dirichlet_bcs_dict is not None
+            )
+            and self.params.association_table is None
+        ):
+            raise Exception(
+                "Must provide association table if defining boundary conditions using both boundary id and dolfin Domain"
+            )
+
+        self.association_table = (
+            self.params.association_table
+            if self.params.association_table is not None
+            else {}
+        )
+        self.neumann_bcs = (
+            self.params.neumann_bcs if self.params.neumann_bcs is not None else []
+        )
+        self.boundaries = (
+            self.params.boundaries
+            if self.params.boundaries is not None
+            else fe.MeshFunction("size_t", self.mesh, self.mesh.topology().dim() - 1)
+        )
+
         if self.params.neumann_bcs_dict is not None:
-            self.boundaries = fe.MeshFunction(
-                "size_t", self.mesh, self.mesh.topology().dim() - 1
-            )
-            self.neumann_bcs = []
             for i, (key, val) in enumerate(self.params.neumann_bcs_dict.items()):
-                key.mark(self.boundaries, i + 1)
+                # Find a index for this bc
+                j = 1
+                while j in self.association_table.values():
+                    j += 1
+                key.mark(self.boundaries, j)
                 self.neumann_bcs.append((i + 1, val))
-        else:
-            self.boundaries = self.params.boundaries
-            self.neumann_bcs = self.params.neumann_bcs
-        self.association_table = self.params.association_table
+                self.association_table[f"Config Neumann BC {i}"] = j
 
         # Generate Dirichlet BC
+        # Mark boundaries first, then get a list of DirichletBC defined by boundary id
+        if self.params.dirichlet_bcs_dict is not None:
+            for i, (key, val) in enumerate(self.params.dirichlet_bcs_dict.items()):
+                # Find a index for this bc
+                j = 1
+                while j in self.association_table.values():
+                    j += 1
+                key.mark(self.boundaries, j)
+                self.association_table[f"Config Dirichlet BC {i}"] = j
+
         self.dirichlet_bcs = self._define_dirichlet_boundaries()
+
+        self.log(f"Association table: {self.association_table}")
 
         self.boundary_ds = fe.ds(
             metadata={"quadrature_degree": self.params.q_deg},
@@ -104,9 +141,8 @@ class NeoHookean:
         )
 
         for i, val in self.neumann_bcs:
-            self.log(
-                f"Applying Neumann boundary {i}: ({fe.assemble(val[0] * self.boundary_ds(i))}, {fe.assemble(val[1] * self.boundary_ds(i))})"
-            )
+            forces = [fe.assemble(x * self.boundary_ds(i)) for x in val]
+            self.log(f"Applying Neumann boundary {i}: {forces}")
 
         # Initialize optimization related variables
         self._optimize_step = 0
@@ -119,14 +155,17 @@ class NeoHookean:
         self.u = fe.Function(self.V_u, name="displacement")
 
     def _define_dirichlet_boundaries(self, fixed_value=None):
-        dirichlet_bcs = [
-            fe.DirichletBC(
-                self.V_u,
-                val if fixed_value is None else fe.Constant([0.0] * len(val)),
-                key,
-            )
-            for key, val in self.params.dirichlet_bcs_dict.items()
-        ]
+        dirichlet_bcs = []
+        if self.params.dirichlet_bcs_dict is not None:
+            dirichlet_bcs += [
+                fe.DirichletBC(
+                    self.V_u,
+                    val if fixed_value is None else fe.Constant([0.0] * len(val)),
+                    self.boundaries,
+                    self.association_table[f"Config Dirichlet BC {i}"],
+                )
+                for i, (_, val) in enumerate(self.params.dirichlet_bcs_dict.items())
+            ]
 
         if self.params.dirichlet_bcs is not None:
             dirichlet_bcs += [
