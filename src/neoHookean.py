@@ -1,4 +1,5 @@
 import dolfin as fe
+import ufl
 from src.default_config import params
 import os
 import importlib
@@ -397,7 +398,27 @@ class NeoHookean:
         e = fe.variable(e)
         if psi is None:
             psi = self._strain_energy_density(Eps=e)
-        sigma = fe.diff(psi, e)
+        s = fe.diff(psi, e)
+        return s
+
+    def _PK1_stress(self, psi=None, F=None):
+        if F is None:
+            F = self._deformation_gradient()
+        F = fe.variable(F)
+        if psi is None:
+            psi = self._strain_energy_density(F=F)
+        p = fe.diff(psi, F)
+        return p
+
+    def _Cauchy_stress(self, psi=None, F=None):
+        if F is None:
+            F = self._deformation_gradient()
+        F = fe.variable(F)
+        if psi is None:
+            psi = self._strain_energy_density(F=F)
+        p = fe.diff(psi, F)
+        J = fe.det(F)
+        sigma = J ** (-1) * p * ufl.transpose(F)
         return sigma
 
     def save(self, main_field=None, time=0):
@@ -430,3 +451,21 @@ class NeoHookean:
             grad_projected = fe.project(self.filtered_gradient, scalar_space)
             grad_projected.rename("Gradient (projected)", "(No description)")
             self.xdmffile.write(grad_projected, time)
+
+    def compute_traction_dirichlet(self):
+        space_for_stress = fe.TensorFunctionSpace(self.mesh, "DG", 0)
+        pk1_stress = fe.project(self._PK1_stress(), space_for_stress)
+        N = fe.FacetNormal(self.mesh)
+        e_x = fe.Constant([1.0, 0.0] + ([] if self.params.dim == 2 else [0.0]))
+        e_y = fe.Constant([0.0, 1.0] + ([] if self.params.dim == 2 else [0.0]))
+        e_z = None if self.params.dim == 2 else fe.Constant((0.0, 0.0, 1.0))
+        tx = fe.dot(fe.dot(pk1_stress, N), e_x)
+        ty = fe.dot(fe.dot(pk1_stress, N), e_y)
+        tz = None if self.params.dim == 2 else fe.dot(fe.dot(pk1_stress, N), e_z)
+        tractions = {}
+        for name, key in self.association_table.items():
+            tractions[name] = [
+                fe.assemble(tx * self.boundary_ds(key)),
+                fe.assemble(ty * self.boundary_ds(key)),
+            ] + ([] if tz is None else [fe.assemble(tz * self.boundary_ds(key))])
+        return tractions
