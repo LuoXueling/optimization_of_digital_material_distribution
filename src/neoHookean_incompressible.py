@@ -1,6 +1,7 @@
 import dolfin as fe
 from src.default_config import params
 from src.neoHookean import NeoHookean
+import numpy as np
 
 
 class NeoHookeanIncompressible(NeoHookean):
@@ -92,3 +93,90 @@ class NeoHookeanIncompressible(NeoHookean):
         p.rename("incompressibility", "(No description)")
         self.xdmffile.write(p, time)
         super().save(main_field=u, time=time)
+
+
+class NeoHookeanIncompressibleStaggered(NeoHookeanIncompressible):
+    def __init__(self, *args, override_params=None, **kwargs):
+        if override_params is None:
+            override_params = dict()
+        override_params.update(dict(elem_order=2))
+        NeoHookean.__init__(self, *args, override_params=override_params, **kwargs)
+        self.log("Enforcing element order = 2 for displacement field")
+
+        # define function space
+        self.V_p = fe.FunctionSpace(self.mesh, "Lagrange", 1)
+
+        # Define functions
+        self.dproj = fe.TrialFunction(self.V_p)
+        self.p_test = fe.TestFunction(self.V_p)
+        self.p = fe.Function(
+            self.V_p, name="incompressibility"
+        )  # fields from previous iteration
+
+    def _initialize_fields(self):
+        NeoHookean._initialize_fields(self)
+        self.p = fe.Function(self.V_p, name="incompressibility")
+
+    def forward(self):
+        F = self._deformation_gradient()
+        C = self._right_cauchy_green(F=F)
+        J = fe.sqrt(fe.det(C))
+        psi = self._strain_energy_density(F=F, C=C)
+
+        # Total potential energy
+        Pi = self._potential_energy(psi=psi)
+
+        # Solve variational problem
+
+        kappa = 10 / (2 * (1 + 0.5))
+        max_kappa = 128 * kappa
+        last_dp_norm = None
+        for i in range(100):
+            # Compute first variation of Pi (directional derivative about u in the direction of v)
+            F_u = fe.derivative(
+                Pi + kappa / 2 * (J - 1) ** 2 * self.dx, self.u, self.u_test
+            )
+            # Compute Jacobian of F
+            J_u = fe.derivative(F_u, self.u, self.du)
+
+            fe.solve(
+                F_u == 0,
+                self.u,
+                self.dirichlet_bcs,
+                J=J_u,
+                solver_parameters={
+                    "newton_solver": {"linear_solver": "mumps", "report": True}
+                },
+            )
+
+            # Project (J-1) into V_p then we have the increment of p
+            dp = fe.project(J - 1, self.V_p)
+
+            dp_norm = fe.norm(dp, "L2")
+            self.p.vector().axpy(kappa, dp.vector())
+
+            if dp_norm < 1e-100:
+                break
+
+            if last_dp_norm is None:
+                last_dp_norm = dp_norm
+
+            self.log(
+                f"dp (J-1) l2-norm (abs) = {dp_norm:.3e}, (rel): {dp_norm/last_dp_norm:.3e}"
+            )
+            if dp_norm < 1e-8:
+                break
+            if dp_norm / last_dp_norm > 0.8:
+                if kappa != max_kappa and i > 0:
+                    kappa = min(2 * kappa, max_kappa)
+                    self.log(f"Update kappa to {kappa}")
+            last_dp_norm = dp_norm
+        else:
+            raise Exception(f"The staggered scheme does not converge")
+
+    def _strain_energy_density(self, *args, **kwargs):
+        return NeoHookeanIncompressible._strain_energy_density(self, *args, **kwargs)
+
+    def save(self, time=0):
+        NeoHookean.save(self, time=time)
+        self.xdmffile.write(self.p, time)
