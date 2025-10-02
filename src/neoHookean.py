@@ -10,14 +10,18 @@ from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 from mpi4py import MPI
+import pickle
+import pandas as pd
 
 
 class NeoHookean:
-    def __init__(self, config_path):
+    def __init__(self, config_path, override_params=None):
         # Load parameters
         params_updated = importlib.import_module(config_path.strip(".py")).params
         self.params = params.copy()
         self.params.update(params_updated)
+        if override_params is not None:
+            self.params.update(override_params)
 
         # Initialize for outputs
         self.path = os.path.join(
@@ -25,13 +29,21 @@ class NeoHookean:
             f"{self.params.project_name}-{datetime.now().strftime('%Y-%m-%d-%H-%M-%S')}",
         )
         os.makedirs(self.path, exist_ok=True)
+        self.log = partial(log, output_file=os.path.join(self.path, "log.txt"))
         shutil.copy2(config_path, os.path.join(self.path, "config.py"))
+        if override_params is not None:
+            self.log(f"Parameters are overriden: {override_params}")
+            self.log(f"Saving overriding parameters")
+            try:
+                with open(os.path.join(self.path, "config_override.pkl"), "wb") as file:
+                    pickle.dump(override_params, file)
+            except Exception as e:
+                self.log(f"Failed to save overriding parameters: {e}")
+
         self.xdmffile = fe.XDMFFile(MPI.COMM_WORLD, os.path.join(self.path, "out.xdmf"))
         self.xdmffile.parameters["flush_output"] = True
         self.xdmffile.parameters["functions_share_mesh"] = True
         self.xdmffile.parameters["rewrite_function_mesh"] = False
-
-        self.log = partial(log, output_file=os.path.join(self.path, "log.txt"))
 
         # Initialize dolfin
         self.dx = fe.dx(metadata={"quadrature_degree": self.params.q_deg})
@@ -74,6 +86,22 @@ class NeoHookean:
         # e.vector().set_local(my_values)
         # e.interpolate(fe.Expression("(x[0]-width/2)*0.2+10", width=width, degree=1), M)
 
+        self.load_boundary_conditions()
+
+        # Initialize optimization related variables
+        self._optimize_step = 0
+        self._loss_history = []
+        self._stage_loss_history = []
+
+        self.optimized = False
+
+        self.records = pd.DataFrame()
+        self.records.index.name = "Step"
+
+    def _initialize_fields(self):
+        self.u = fe.Function(self.V_u, name="displacement")
+
+    def load_boundary_conditions(self):
         # Mark Neumann boundaries
         if self.params.boundaries is None and (
             self.params.neumann_bcs is not None or self.params.dirichlet_bcs is not None
@@ -145,16 +173,6 @@ class NeoHookean:
             forces = [fe.assemble(x * self.boundary_ds(i)) for x in val]
             self.log(f"Applying Neumann boundary {i}: {forces}")
 
-        # Initialize optimization related variables
-        self._optimize_step = 0
-        self._loss_history = []
-        self._stage_loss_history = []
-
-        self.optimized = False
-
-    def _initialize_fields(self):
-        self.u = fe.Function(self.V_u, name="displacement")
-
     def _define_dirichlet_boundaries(self, fixed_value=None):
         dirichlet_bcs = []
         if self.params.dirichlet_bcs_dict is not None:
@@ -215,10 +233,13 @@ class NeoHookean:
         raise NotImplementedError()
 
     def eval(self, x):
-        self.log(f"Taking input: min={np.min(x)}, max={np.max(x)}")
+        self.log(
+            f"Taking input: min={MPI.COMM_WORLD.allreduce(np.min(x), op=MPI.MIN)}, max={MPI.COMM_WORLD.allreduce(np.max(x), op=MPI.MAX)}"
+        )
         self._set_optimized_variable(x)
         # Solve \partial L/\partial \lambda = 0, i.e. the governing equation it self
         self.log("Solving forward problem")
+        MPI.COMM_WORLD.Barrier()
         try:
             self.forward()
         except:
@@ -226,10 +247,12 @@ class NeoHookean:
             return np.inf
         loss = fe.assemble(self._objective_function())
         self.log(f"Loss: {loss}")
+        MPI.COMM_WORLD.Barrier()
         return loss
 
     def grad(self, x):
         self.log("Solving gradient")
+        MPI.COMM_WORLD.Barrier()
         self._set_optimized_variable(x)
         # Solve \partial L/\partial u = 0 for \lambda. It's a linear equation.
         j = self._objective_function()
@@ -271,6 +294,7 @@ class NeoHookean:
         )
         grad = dj_dp + dfl_dp
         self.gradient.vector()[:] = grad
+        MPI.COMM_WORLD.Barrier()
         return grad.get_local()
 
     def optimize(self):
@@ -280,6 +304,7 @@ class NeoHookean:
 
         for i in range(self.params.maxiter):
             print()
+            MPI.COMM_WORLD.Barrier()
             self.log(f"----- Iteration {i} -----")
             res = self.eval(x)
             self._loss_history.append(res)
@@ -291,18 +316,19 @@ class NeoHookean:
                     x[i] = max(bound[0], x[i])
                 if bound[1] is not None:
                     x[i] = min(bound[1], x[i])
+            MPI.COMM_WORLD.Barrier()
             self.optimized = True
             terminate = self._optimize_callback()
             if terminate:
                 break
-
-        plt.figure(figsize=(4, 3), dpi=300)
-        ax = plt.subplot(111)
-        ax.plot(np.arange(len(self._loss_history)), self._loss_history)
-        ax.set_xlabel("Iteration")
-        ax.set_ylabel("Loss")
-        plt.tight_layout()
-        plt.savefig(os.path.join(self.path, "loss.pdf"))
+        if MPI.COMM_WORLD.Get_rank() == 0:
+            plt.figure(figsize=(4, 3), dpi=300)
+            ax = plt.subplot(111)
+            ax.plot(np.arange(len(self._loss_history)), self._loss_history)
+            ax.set_xlabel("Iteration")
+            ax.set_ylabel("Loss")
+            plt.tight_layout()
+            plt.savefig(os.path.join(self.path, "loss.pdf"))
 
     def _optimize_callback(self, *args) -> bool:
         # self._initialize_fields()
@@ -452,9 +478,17 @@ class NeoHookean:
             grad_projected.rename("Gradient (projected)", "(No description)")
             self.xdmffile.write(grad_projected, time)
 
-    def compute_traction_dirichlet(self):
+    def compute_traction_dirichlet(self, type="PK1"):
         space_for_stress = fe.TensorFunctionSpace(self.mesh, "DG", 0)
-        pk1_stress = fe.project(self._PK1_stress(), space_for_stress)
+        if type == "PK1":
+            stress = self._PK1_stress()
+        elif type == "Cauchy":
+            stress = self._Cauchy_stress()
+        else:
+            raise Exception(
+                f"Stress type {type} not supported for computing tractions."
+            )
+        pk1_stress = fe.project(stress, space_for_stress)
         N = fe.FacetNormal(self.mesh)
         e_x = fe.Constant([1.0, 0.0] + ([] if self.params.dim == 2 else [0.0]))
         e_y = fe.Constant([0.0, 1.0] + ([] if self.params.dim == 2 else [0.0]))
@@ -469,3 +503,17 @@ class NeoHookean:
                 fe.assemble(ty * self.boundary_ds(key)),
             ] + ([] if tz is None else [fe.assemble(tz * self.boundary_ds(key))])
         return tractions
+
+    def record_traction_dirichlet(self, type="PK1", step=0):
+        tractions = self.compute_traction_dirichlet(type="PK1")
+        for name, values in tractions.items():
+            for val, dir in zip(
+                values, ["x", "y"] + (["z"] if len(values) == 3 else [])
+            ):
+                self.records.loc[step, f"{name}_{dir}"] = val
+
+    def record(self, step, name, value):
+        self.records.loc[step, name] = value
+
+    def save_records(self):
+        self.records.to_csv(os.path.join(self.path, "records.csv"))

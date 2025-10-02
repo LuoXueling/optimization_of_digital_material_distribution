@@ -7,8 +7,8 @@ import os
 
 
 class NeoHookeanTopoOpt(NeoHookean):
-    def __init__(self, config_path):
-        super().__init__(config_path)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
         # Defined optimized variable
         self.filtered_gradient = fe.Function(self.V_e, name="Filtered gradient")

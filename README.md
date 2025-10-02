@@ -5,9 +5,9 @@
 This repo is built upon Python 3.8 and FEniCS 2019.1
 
 ```shell
-conda create -n fenics-adjoint-19 python=3.8
+conda create -n fenics-adjoint-19 python=3.7
 conda activate fenics-adjoint-19
-conda install -c conda-forge fenics==2019.1 matplotlib==3.0.3 superlu_dist==6.2.0 mpi4py==3.0.3 mshr meshio==4.4.0
+conda install -c conda-forge fenics==2019.1 matplotlib==3.0.3 pandas==1.3.5 superlu_dist==6.2.0 mpi4py==3.0.3 mshr meshio==4.4.0
 pip install scipy==1.7.3
 ```
 

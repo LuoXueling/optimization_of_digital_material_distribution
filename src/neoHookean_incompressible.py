@@ -4,8 +4,8 @@ from src.neoHookean import NeoHookean
 
 
 class NeoHookeanIncompressible(NeoHookean):
-    def __init__(self, config_path):
-        super().__init__(config_path)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
 
         # define function space
         self.V_w = fe.FunctionSpace(
