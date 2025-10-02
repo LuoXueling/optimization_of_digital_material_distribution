@@ -2,7 +2,7 @@
 
 ## Installation
 
-This repo is built upon Python 3.8 and FEniCS 2019.1
+This repo is built upon Python 3.7 and FEniCS 2019.1
 
 ```shell
 conda create -n fenics-adjoint-19 python=3.7
@@ -19,6 +19,7 @@ If using VSCode to debug (with the extension `Python Debugger`), install a previ
 
 * `src/neoHookean.py` implements a neo-Hookean model and a basic optimization framework as the foundation of all other implementations. 
 * `src/neoHookean_topo_opt.py` implements a simple implementation of adjoint-state-method-based SIMP topology optimization for a neo-Hookean model. 
+* `src/neoHookean_incompressible.py` implements the incompressible neo-Hookean model using coupled u-p scheme and staggered (augmented Lagrange) scheme.
 
 ### Configuration and execution
 
