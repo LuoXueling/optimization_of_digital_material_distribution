@@ -1,4 +1,6 @@
 from datetime import datetime
+from copy import deepcopy
+from mpi4py import MPI
 
 
 class dotdict(dict):
@@ -6,11 +8,18 @@ class dotdict(dict):
     __setattr__ = dict.__setitem__
     __delattr__ = dict.__delitem__
 
+    def copy(self):
+        return dotdict(super().copy())
+
 
 def log(*args, **kwargs):
+    rank = MPI.COMM_WORLD.Get_rank()
+    if rank != 0:
+        return None
     l = f"[{datetime.now().strftime('%m-%d-%Y,%H:%M:%S')}]"
     output_file = kwargs.get("output_file", None)
     _kwargs = kwargs.copy()
+    _kwargs.update(dict(flush=True))
     if output_file is not None:
         del _kwargs["output_file"]
     if len(args) == 0:
