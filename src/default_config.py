@@ -1,4 +1,8 @@
-import dolfin as fe
+from mpi4py import MPI
+from petsc4py.PETSc import ScalarType
+import dolfinx.mesh as dmesh
+import dolfinx.fem as fem
+import numpy as np
 from src.utils import dotdict
 
 
@@ -24,50 +28,50 @@ params = dotdict(
     # Elasticity parameters
     E=10.0,
     nu=0.3,
-    # Body force
-    B=fe.Constant((0.0, -0.0)),  # Body force per unit volume # Modify for 3D
 )
+
+_mesh = dmesh.create_rectangle(
+    comm=MPI.COMM_WORLD,
+    points=((0.0, 0.0), (params.width, params.height)),
+    n=(
+        int(params.width // params.mesh_size),
+        int(params.height // params.mesh_size),
+    ),
+    cell_type=dmesh.CellType.quadrilateral,
+)  # Modify for 3D
 
 params.update(
     dotdict(
-        mesh=fe.RectangleMesh.create(
-            [fe.Point(0.0, 0.0), fe.Point(params.width, params.height)],
-            [
-                int(params.width // params.mesh_size),
-                int(params.height // params.mesh_size),
-            ],
-            fe.CellType.Type.quadrilateral,
-        ),  # Modify for 3D
+        mesh=_mesh,
+        # Body force
+        B=fem.Constant(_mesh, ScalarType((0.0, 0.0))),  # Body force per unit volume # Modify for 3D
         # Mark Dirichlet boundary subdomains and values
+        # dirichlet_bcs_dict: Define Dirichlet BCs using geometric marker functions
+        #   - Key: lambda function that marks boundary (e.g., lambda x: np.isclose(x[0], 0.0))
+        #   - Value: Either a full-vector Constant (all components) OR a dict for component-wise BCs
+        #
+        #   Full-vector example (constrains all displacement components):
+        #     lambda x: np.isclose(x[0], 0.0): fem.Constant(_mesh, ScalarType((0.0, 0.0)))
+        #
+        #   Component-wise example (constrains only specific components):
+        #     lambda x: np.isclose(x[0], 0.0): {0: 0.0}  # Only constrains u_x = 0.0
+        #     lambda x: np.isclose(x[1], 0.0): {1: fem.Constant(_mesh, ScalarType(0.0))}  # Only constrains u_y
+        #     lambda x: np.isclose(x[0], width): {0: 0.1, 1: 0.0}  # Constrains both u_x and u_y
         dirichlet_bcs_dict={
-            fe.CompiledSubDomain(
-                "near(x[0], side) && on_boundary", side=0.0
-            ): fe.Constant(
-                (0.0, 0.0)
-            ),  # Modify for 3D
+            lambda x: np.isclose(x[0], 0.0): fem.Constant(_mesh, ScalarType((0.0, 0.0))),  # Modify for 3D
         },
         # Mark Neumann boundary subdomains and values
         neumann_bcs_dict={
-            fe.CompiledSubDomain(
-                "near(x[0], side) && near(x[1], pos, length/2) && on_boundary",
-                side=params.width,
-                pos=params.height / 2,
-                length=params.height / 8,
-            ): fe.Constant(
-                (0.000, -0.0001)
-            ),  # Modify for 3D
-            # fe.CompiledSubDomain(
-            #     "near(x[0], side) && on_boundary",
-            #     side=width,
-            # ): fe.Constant(
-            #     (0.0001, 0.000)
-            # ),  # Modify for 3D
+            lambda x: np.isclose(x[0], params.width) & np.isclose(x[1], params.height / 2, atol=params.height / 8 / 2): fem.Constant(_mesh, ScalarType((0.0, -0.0001))),  # Modify for 3D
         },
         # An alternative to define Dirichlet/Neumann boundaries by using msh2xdmf.py
         # This approach can be used together with dirichlet_bcs_dict and neumann_bcs_dict
-        boundaries=None,  # boundaries is a MeshFunction with some boundaries marked for neumann bcs
+        boundaries=None,  # boundaries is a MeshTags with some boundaries marked for neumann bcs
         association_table=None,  # A dict that maps boundary names to boundary id
         neumann_bcs=None,  # a list of tuples (boundary_id, (f_x, f_y, f_z)).
-        dirichlet_bcs=None,  # a list of tuples (boundary_id, (u_x, u_y, u_z))
+        # dirichlet_bcs: Define Dirichlet BCs using boundary marker IDs (from MeshTags)
+        #   Format: list of tuples (marker_id, value) where value follows same format as dirichlet_bcs_dict
+        #   Examples: [(1, fem.Constant(_mesh, ScalarType((0.0, 0.0))))] or [(1, {0: 0.0}), (2, {1: 0.0})]
+        dirichlet_bcs=None,
     )
 )

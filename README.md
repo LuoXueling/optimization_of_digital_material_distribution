@@ -2,16 +2,14 @@
 
 ## Installation
 
-This repo is built upon Python 3.7 and FEniCS 2019.1
+This repo is built upon Python 3.12 and FEniCSx (DOLFINx)
 
 ```shell
-conda create -n fenics-adjoint-19 python=3.7
-conda activate fenics-adjoint-19
-conda install -c conda-forge fenics==2019.1 matplotlib==3.0.3 pandas==1.3.5 superlu_dist==6.2.0 mpi4py==3.0.3 mshr meshio==4.4.0
-pip install scipy==1.7.3
+conda create -n fenicsx python=3.12
+conda activate fenicsx
+conda install -c conda-forge fenics-dolfinx mpich pyvista 
+conda install -c conda-forge gmsh python-gmsh matplotlib pandas scipy
 ```
-
-If using VSCode to debug (with the extension `Python Debugger`), install a previous `Python Debugger` version `2024.10.0`.
 
 ## Usage
 
@@ -34,9 +32,12 @@ Generate a 2D triangular mesh using `gmsh`, with boundaries defined in "Physical
 In `config.py`:
 
 ```python
-import dolfin as fe
+from mpi4py import MPI
+from petsc4py.PETSc import ScalarType
+import dolfinx.fem as fem
+import numpy as np
 from src.utils import dotdict
-from src.msh2xdmf import msh2xdmf, import_mesh
+from src.msh2xdmf import import_mesh
 
 params = dotdict(
     # Project settings
@@ -47,8 +48,6 @@ params = dotdict(
     # Elasticity parameters
     E=10.0,
     nu=0.3,
-    # Body force
-    B=fe.Constant((0.0, -0.0)),  # Body force per unit volume # Modify for 3D
 )
 
 mesh, boundaries, association_table = import_mesh("square", directory="mesh")
@@ -56,23 +55,21 @@ mesh, boundaries, association_table = import_mesh("square", directory="mesh")
 params.update(
     dotdict(
         mesh=mesh,
+        # Body force
+        B=fem.Constant(mesh, ScalarType((0.0, 0.0))),  # Body force per unit volume # Modify for 3D
         # Mark Dirichlet boundary subdomains and values
         dirichlet_bcs_dict={
-            fe.CompiledSubDomain(
-                "near(x[0], side) && on_boundary", side=0.0
-            ): fe.Constant(
-                (0.0, 0.0)
-            ),  # Modify for 3D
+            lambda x: np.isclose(x[0], 0.0): fem.Constant(mesh, ScalarType((0.0, 0.0))),  # Modify for 3D
         },
         neumann_bcs_dict=None,
-        boundaries=boundaries,  # boundaries is a MeshFunction with some boundaries marked for neumann bcs
+        boundaries=boundaries,  # boundaries is a MeshTags with some boundaries marked for neumann bcs
         association_table=association_table,
         neumann_bcs=[
-            (association_table["upper"], fe.Constant((0.0, -0.001))),
-            (association_table["right"], fe.Constant((-0.001, 0.0))),
+            (association_table["upper"], fem.Constant(mesh, ScalarType((0.0, -0.001)))),
+            (association_table["right"], fem.Constant(mesh, ScalarType((-0.001, 0.0)))),
         ],  # a list of tuples (boundary_id, (f_x, f_y, f_z)).
         dirichlet_bcs=[
-            (association_table["bottom"], fe.Constant((0.0, 0.0)))
+            (association_table["bottom"], fem.Constant(mesh, ScalarType((0.0, 0.0))))
         ],  # a list of tuples (boundary_id, (u_x, u_y, u_z))
     )
 )
@@ -95,7 +92,11 @@ This example generates mesh and define Dirichlet and Neumann boundaries using FE
 In `config.py`:
 
 ```python
-import dolfin as fe
+from mpi4py import MPI
+from petsc4py.PETSc import ScalarType
+import dolfinx.mesh as dmesh
+import dolfinx.fem as fem
+import numpy as np
 from src.utils import dotdict
 
 params = dotdict(
@@ -123,37 +124,29 @@ params = dotdict(
     # Elasticity parameters
     E=10.0,
     nu=0.3,
-    # Body force
-    B=fe.Constant((0.0, -0.0)),  # Body force per unit volume # Modify for 3D
 )
+
+_mesh = dmesh.create_rectangle(
+    comm=MPI.COMM_WORLD,
+    points=((0.0, 0.0), (params.width, params.height)),
+    n=(
+        int(params.width // params.mesh_size),
+        int(params.height // params.mesh_size),
+    ),
+    cell_type=dmesh.CellType.quadrilateral,
+)  # Modify for 3D
 
 params.update(
     dotdict(
-        mesh=fe.RectangleMesh.create(
-            [fe.Point(0.0, 0.0), fe.Point(params.width, params.height)],
-            [
-                int(params.width // params.mesh_size),
-                int(params.height // params.mesh_size),
-            ],
-            fe.CellType.Type.quadrilateral,
-        ),  # Modify for 3D
+        mesh=_mesh,
+        # Body force
+        B=fem.Constant(_mesh, ScalarType((0.0, 0.0))),  # Body force per unit volume # Modify for 3D
         # Mark Dirichlet boundary subdomains and values
         dirichlet_bcs_dict={
-            fe.CompiledSubDomain(
-                "near(x[0], side) && on_boundary", side=0.0
-            ): fe.Constant(
-                (0.0, 0.0)
-            ),  # Modify for 3D
+            lambda x: np.isclose(x[0], 0.0): fem.Constant(_mesh, ScalarType((0.0, 0.0))),  # Modify for 3D
         },
         neumann_bcs_dict={
-            fe.CompiledSubDomain(
-                "near(x[0], side) && near(x[1], pos, length) && on_boundary",
-                side=params.width,
-                pos=0,
-                length=params.mesh_size * 1.1,
-            ): fe.Constant(
-                (0.000, -0.0001)
-            ),  # Modify for 3D
+            lambda x: np.isclose(x[0], params.width) & np.isclose(x[1], 0, atol=params.mesh_size * 1.1): fem.Constant(_mesh, ScalarType((0.0, -0.0001))),  # Modify for 3D
         },
     )
 )
