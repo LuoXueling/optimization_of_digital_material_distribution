@@ -98,20 +98,40 @@ def restore_stdout_from_log(old_stdout_fd, log_file_info):
 
 
 def project(expression, target_space, name="projected"):
-    from dolfinx.fem.petsc import LinearProblem
+    from dolfinx.fem.petsc import assemble_matrix, assemble_vector
+    from petsc4py import PETSc
 
+    mesh = target_space.mesh
+
+    u = ufl.TrialFunction(target_space)
     v = ufl.TestFunction(target_space)
     u_proj = fem.Function(target_space, name=name)
 
-    # Use reduced quadrature degree to avoid excessive memory in JIT compilation
-    # For DG0, quadrature degree 2 is sufficient
     dx_proj = ufl.dx(metadata={"quadrature_degree": 2})
-    a = ufl.inner(ufl.TrialFunction(target_space), v) * dx_proj
-    L = ufl.inner(expression, v) * dx_proj
 
-    # Use efficient solver settings for projection
-    problem = LinearProblem(a, L)
-    u_proj = problem.solve()
+    a = fem.form(ufl.inner(u, v) * dx_proj)
+    L = fem.form(ufl.inner(expression, v) * dx_proj)
+
+    A = assemble_matrix(a)
+    A.assemble()
+
+    b = assemble_vector(L)
+    b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+
+    solver = PETSc.KSP().create(mesh.comm)
+    solver.setOperators(A)
+    solver.setType("cg")
+    solver.getPC().setType("jacobi")
+    solver.setTolerances(rtol=1e-10, atol=1e-10, max_it=1000)
+
+    solver.solve(b, u_proj.x.petsc_vec)
+    u_proj.x.scatter_forward()
+
+    # Clean up PETSc objects to avoid MPI communicator leak
+    solver.destroy()
+    A.destroy()
+    b.destroy()
+
     u_proj.name = name
     return u_proj
 
