@@ -66,15 +66,12 @@ class NeoHookean:
         # Create mesh
         self.mesh = self.params.mesh
 
-        local_area = fem.assemble_scalar(
-            fem.form(
-                1.0
-                * self.dx(
-                    metadata={"quadrature_degree": self.params.q_deg}, domain=self.mesh
-                )
+        self.area = self._assemble_scalar_parallel(
+            1.0
+            * self.dx(
+                metadata={"quadrature_degree": self.params.q_deg}, domain=self.mesh
             )
         )
-        self.area = self.mesh.comm.allreduce(local_area, op=MPI.SUM)
 
         # define function space
         self.V_u = fem.functionspace(
@@ -228,10 +225,13 @@ class NeoHookean:
         for i, val in self.neumann_bcs:
             forces = []
             for x in val:
-                local_force = fem.assemble_scalar(fem.form(x * self.boundary_ds(i)))
-                global_force = self.mesh.comm.allreduce(local_force, op=MPI.SUM)
+                global_force = self._assemble_scalar_parallel(x * self.boundary_ds(i))
                 forces.append(global_force)
             self.log(f"Applying Neumann boundary {i}: {forces}")
+
+    def _assemble_scalar_parallel(self, expression):
+        local_val = fem.assemble_scalar(fem.form(expression))
+        return self.mesh.comm.allreduce(local_val, op=MPI.SUM)
 
     def _define_dirichlet_boundaries(self, fixed_value=None):
         dirichlet_bcs = []
@@ -391,8 +391,7 @@ class NeoHookean:
         except:
             self._initialize_fields()
             return np.inf
-        local_loss = fem.assemble_scalar(fem.form(self._objective_function()))
-        loss = self.mesh.comm.allreduce(local_loss, op=MPI.SUM)
+        loss = self._assemble_scalar_parallel(self._objective_function())
         self.log(f"Loss: {loss}")
         self.mesh.comm.Barrier()
         return loss
@@ -712,15 +711,12 @@ class NeoHookean:
         tz = None if self.params.dim == 2 else ufl.dot(ufl.dot(pk1_stress, N), e_z)
         tractions = {}
         for name, key in self.association_table.items():
-            local_tx = fem.assemble_scalar(fem.form(tx * self.boundary_ds(key)))
-            local_ty = fem.assemble_scalar(fem.form(ty * self.boundary_ds(key)))
-            global_tx = self.mesh.comm.allreduce(local_tx, op=MPI.SUM)
-            global_ty = self.mesh.comm.allreduce(local_ty, op=MPI.SUM)
+            global_tx = self._assemble_scalar_parallel(tx * self.boundary_ds(key))
+            global_ty = self._assemble_scalar_parallel(ty * self.boundary_ds(key))
 
             tractions[name] = [global_tx, global_ty]
             if tz is not None:
-                local_tz = fem.assemble_scalar(fem.form(tz * self.boundary_ds(key)))
-                global_tz = self.mesh.comm.allreduce(local_tz, op=MPI.SUM)
+                global_tz = self._assemble_scalar_parallel(tz * self.boundary_ds(key))
                 tractions[name].append(global_tz)
         return tractions
 

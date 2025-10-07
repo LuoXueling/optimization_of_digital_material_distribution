@@ -16,50 +16,35 @@ class NeoHookeanTopoOpt(NeoHookean):
         self.filtered_gradient = fem.Function(self.V_e, name="Filtered gradient")
 
         # Initialize optimization related variables
-        self._initial_strain_energy_density = None
-        self._initial_weight_constraint = None
+        self._initial_values = {}
         self.penalty = self.params.init_penalty
 
+
+    def _normalized_scalar_expression(self, expression, name):
+        if name not in self._initial_values.keys():
+            local_val = fem.assemble_scalar(fem.form(expression))
+            self._initial_values[name] = self.mesh.comm.allreduce(local_val, op=MPI.SUM)
+        normalized_scalar = 1 / self._initial_values[name] * expression
+        return normalized_scalar
+
     def _objective_function(self):
-        if self._initial_strain_energy_density is None:
-            local_sed = fem.assemble_scalar(
-                fem.form(self._strain_energy_density() * self.dx)
-            )
-            self._initial_strain_energy_density = self.mesh.comm.allreduce(
-                local_sed, op=MPI.SUM
-            )
-        compliance = (
-            self._strain_energy_density()
-            / self._initial_strain_energy_density
-            * self.dx
+        stored_energy = self._normalized_scalar_expression(
+            self._strain_energy_density() * self.dx
         )
         softplus = lambda x: ufl.ln(1 + ufl.exp(10 * x)) / 10
-        if self._initial_weight_constraint is None:
-            local_wc = fem.assemble_scalar(
-                fem.form(softplus(self.e - self.params.target_volume) * self.dx)
-            )
-            self._initial_weight_constraint = self.mesh.comm.allreduce(
-                local_wc, op=MPI.SUM
-            )
-        weight = (
-            50
-            * softplus(self.e - self.params.target_volume)
-            / self._initial_weight_constraint
-            * self.dx
+        weight = 50 * self._normalized_scalar_expression(
+            softplus(self.e - self.params.target_volume) * self.dx
         )
         gray_level = 20 * self.e * (1.0 - self.e) * 4 / self.area * self.dx
 
-        local_compliance = fem.assemble_scalar(fem.form(compliance))
-        global_compliance = self.mesh.comm.allreduce(local_compliance, op=MPI.SUM)
-        local_weight = fem.assemble_scalar(fem.form(weight))
-        global_weight = self.mesh.comm.allreduce(local_weight, op=MPI.SUM)
-        local_gray = fem.assemble_scalar(fem.form(gray_level))
-        global_gray = self.mesh.comm.allreduce(local_gray, op=MPI.SUM)
+        stored_energy_val = self._assemble_scalar_parallel(stored_energy)
+        weight_val = self._assemble_scalar_parallel(weight)
+        gray_level_val = self._assemble_scalar_parallel(gray_level)
 
         self.log(
-            f"Compliance: {global_compliance}, Average density squared: {global_weight}, Gray level: {global_gray}"
+            f"Stored energy: {stored_energy_val}, weight constraint: {weight_val}, Gray level: {gray_level_val}"
         )
-        return compliance + weight + gray_level
+        return stored_energy + weight + gray_level
 
     def _initial_values(self):
         return np.array([1.0] * len(self.e.x.array))
@@ -162,11 +147,8 @@ class NeoHookeanTopoOpt(NeoHookean):
             if (self.penalty == self.params.init_penalty) or (
                 self.params.init_penalty < self.penalty < self.params.max_penalty
             ):
-                local_gray = fem.assemble_scalar(
-                    fem.form(self.e * (1.0 - self.e) * self.dx)
-                )
-                gray_level = (
-                    self.mesh.comm.allreduce(local_gray, op=MPI.SUM) * 4 / self.area
+                gray_level = self._assemble_scalar_parallel(
+                    self.e * (1.0 - self.e) * 4 / self.area * self.dx
                 )
                 self.penalty = min(
                     self.penalty * (1 + 0.3 ** (1 + gray_level / 2)),
