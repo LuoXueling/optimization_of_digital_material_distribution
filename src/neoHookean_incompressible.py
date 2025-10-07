@@ -15,7 +15,9 @@ class NeoHookeanIncompressible(NeoHookean):
 
         # define function space (mixed element)
         # P2 vector element for displacement
-        el_u = basix.ufl.element("Lagrange", self.mesh.basix_cell(), 2, shape=(self.mesh.geometry.dim,))
+        el_u = basix.ufl.element(
+            "Lagrange", self.mesh.basix_cell(), 2, shape=(self.mesh.geometry.dim,)
+        )
         # P1 scalar element for pressure (Lagrange multiplier)
         el_p = basix.ufl.element("Lagrange", self.mesh.basix_cell(), 1)
         # Create mixed element
@@ -54,7 +56,9 @@ class NeoHookeanIncompressible(NeoHookean):
         J = ufl.derivative(F, self.w, ufl.TrialFunction(self.V_w))
 
         # Solve variational problem
-        solve_nonlinear_problem(F, self.w, bcs=self.dirichlet_bcs, J=J, comm=self.mesh.comm)
+        solve_nonlinear_problem(
+            F, self.w, bcs=self.dirichlet_bcs, J=J, comm=self.mesh.comm
+        )
 
     def _strain_energy_density(self, F=None, C=None, Eps=None):
         to_3d = lambda x: (
@@ -142,12 +146,19 @@ class NeoHookeanIncompressibleStaggered(NeoHookeanIncompressible):
             J_u = ufl.derivative(F_u, self.u, self.du)
 
             # Solve nonlinear problem
-            solve_nonlinear_problem(F_u, self.u, bcs=self.dirichlet_bcs, J=J_u, comm=self.mesh.comm)
+            solve_nonlinear_problem(
+                F_u, self.u, bcs=self.dirichlet_bcs, J=J_u, comm=self.mesh.comm
+            )
 
             # Project (J-1) into V_p then we have the increment of p
             dp = project(J - 1, self.V_p, "dp")
 
-            dp_norm = np.sqrt(self.mesh.comm.allreduce(fem.assemble_scalar(fem.form(ufl.inner(dp, dp) * ufl.dx)), op=MPI.SUM))
+            dp_norm = np.sqrt(
+                self.mesh.comm.allreduce(
+                    fem.assemble_scalar(fem.form(ufl.inner(dp, dp) * self.dx)),
+                    op=MPI.SUM,
+                )
+            )
             self.p.x.array[:] += kappa * dp.x.array[:]
 
             if dp_norm < 1e-100:

@@ -467,11 +467,11 @@ class NeoHookean:
             self._stage_loss_history.append(res)
             grad = self.grad(x)
             x -= self.params.lr * grad
-            for i, bound in zip(range(len(x)), self._bounds()):
+            for j, bound in zip(range(len(x)), self._bounds()):
                 if bound[0] is not None:
-                    x[i] = max(bound[0], x[i])
+                    x[j] = max(bound[0], x[j])
                 if bound[1] is not None:
-                    x[i] = min(bound[1], x[i])
+                    x[j] = min(bound[1], x[j])
             self.mesh.comm.Barrier()
             self.optimized = True
             terminate = self._optimize_callback()
@@ -617,7 +617,8 @@ class NeoHookean:
             self.mesh, ("DG", 0, (self.mesh.geometry.dim, self.mesh.geometry.dim))
         )
         e = project(self._strain(), tensor_space, "strain")
-        sigma = project(self._PK2_stress(), tensor_space, "PK2_stress")
+        pk2 = project(self._PK2_stress(), tensor_space, "PK2_stress")
+        sigma = project(self._Cauchy_stress(), tensor_space, "Cauchy_stress")
 
         scalar_space = fem.functionspace(self.mesh, ("DG", 0))
         psi = project(
@@ -630,16 +631,15 @@ class NeoHookean:
 
         cell_data = {
             "strain": e,
-            "PK2_stress": sigma,
+            "PK2_stress": pk2,
+            "Cauchy_stress": sigma,
             "strain_energy_density": psi,
             "mpi_rank": rank_field,
         }
 
         if self.optimized:
             e_projected = project(self.e, scalar_space, "Optimized_projected")
-            grad_projected = project(
-                self.filtered_gradient, scalar_space, "Gradient_projected"
-            )
+            grad_projected = project(self.gradient, scalar_space, "Gradient_projected")
             cell_data.update(
                 {
                     "Optimized_projected": e_projected,

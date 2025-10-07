@@ -25,7 +25,9 @@ class NeoHookeanTopoOpt(NeoHookean):
             local_sed = fem.assemble_scalar(
                 fem.form(self._strain_energy_density() * self.dx)
             )
-            self._initial_strain_energy_density = self.mesh.comm.allreduce(local_sed, op=MPI.SUM)
+            self._initial_strain_energy_density = self.mesh.comm.allreduce(
+                local_sed, op=MPI.SUM
+            )
         compliance = (
             self._strain_energy_density()
             / self._initial_strain_energy_density
@@ -36,7 +38,9 @@ class NeoHookeanTopoOpt(NeoHookean):
             local_wc = fem.assemble_scalar(
                 fem.form(softplus(self.e - self.params.target_volume) * self.dx)
             )
-            self._initial_weight_constraint = self.mesh.comm.allreduce(local_wc, op=MPI.SUM)
+            self._initial_weight_constraint = self.mesh.comm.allreduce(
+                local_wc, op=MPI.SUM
+            )
         weight = (
             50
             * softplus(self.e - self.params.target_volume)
@@ -145,6 +149,7 @@ class NeoHookeanTopoOpt(NeoHookean):
         if self._optimize_step % self.params.output_per_step == 0:
             self.save(time=self._optimize_step)
         self._optimize_step += 1
+
         if len(self._loss_history) > 1 and (
             0
             < (1 - self._loss_history[-1] / self._loss_history[-2])
@@ -157,8 +162,12 @@ class NeoHookeanTopoOpt(NeoHookean):
             if (self.penalty == self.params.init_penalty) or (
                 self.params.init_penalty < self.penalty < self.params.max_penalty
             ):
-                local_gray = fem.assemble_scalar(fem.form(self.e * (1.0 - self.e) * self.dx))
-                gray_level = self.mesh.comm.allreduce(local_gray, op=MPI.SUM) * 4 / self.area
+                local_gray = fem.assemble_scalar(
+                    fem.form(self.e * (1.0 - self.e) * self.dx)
+                )
+                gray_level = (
+                    self.mesh.comm.allreduce(local_gray, op=MPI.SUM) * 4 / self.area
+                )
                 self.penalty = min(
                     self.penalty * (1 + 0.3 ** (1 + gray_level / 2)),
                     self.params.max_penalty,
