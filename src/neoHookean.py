@@ -265,8 +265,12 @@ class NeoHookean:
             bc_list.extend(self.params.dirichlet_bcs)
 
         # Process all BCs uniformly
+        marker_facets_num = {}
         for marker_id, val in bc_list:
             facets = self.boundaries.find(marker_id)
+            marker_facets_num[marker_id] = self.mesh.comm.allreduce(
+                len(facets), op=MPI.SUM
+            )
 
             # Check if val is a dict (component-wise BC) or Constant (all components)
             if isinstance(val, dict):
