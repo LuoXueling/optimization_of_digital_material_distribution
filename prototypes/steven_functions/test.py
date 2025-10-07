@@ -115,6 +115,10 @@ c_truth = 2.0895
 mat_name = "DM-70"
 tau = 10
 
+disable_integration = True
+plot_ref = True
+plot_all_in_one = True
+
 
 def plot_once(v, c_truth):
     T = np.linspace(0, 1.5 / v, 500)
@@ -128,18 +132,23 @@ def plot_once(v, c_truth):
     for i, t in enumerate(T):
         print(f"{t}/{T[-1]}")
         s_e = sigma_truth.subs(lmbda, 1.0 + v * t)
-        s_e_list.append(s_e[0, 0])
-        integrated_values_11 = []
-        for j, s in enumerate(T[: i + 1]):
-            integrated_values_11.append(
-                -(gamma_truth / tau) * np.exp(-(t - s) / tau) * s_e_list[j]
-            )
-        integrated_11 = 0.0
-        if i > 0:
-            for j in range(i):
-                integrated_11 += (
-                    (integrated_values_11[j] + integrated_values_11[j + 1]) * space / 2
+        if disable_integration:
+            integrated_11 = 0.0
+        else:
+            s_e_list.append(s_e[0, 0])
+            integrated_values_11 = []
+            for j, s in enumerate(T[: i + 1]):
+                integrated_values_11.append(
+                    -(gamma_truth / tau) * np.exp(-(t - s) / tau) * s_e_list[j]
                 )
+            integrated_11 = 0.0
+            if i > 0:
+                for j in range(i):
+                    integrated_11 += (
+                        (integrated_values_11[j] + integrated_values_11[j + 1])
+                        * space
+                        / 2
+                    )
         s11 = s_e[0, 0] + integrated_11
 
         x.append(1.0 + v * t)
@@ -147,26 +156,87 @@ def plot_once(v, c_truth):
     return x, y
 
 
-plt.figure(figsize=(3, 2.5), dpi=150)
+plt.figure(figsize=(4, 2.5), dpi=150)
 ax = plt.subplot(111)
 
-df = pd.read_csv(f"{mat_name}-0.9e-1.csv", sep=", ")
-ax.plot(df["x"], df["y"], label="0.9e-1 (Steven)", c="#5171A5", ls=":", lw=2.5)
+if plot_all_in_one:
+    c_truth = 0.0
+    mat_name = "A"
+    ax.plot(
+        *plot_once(1, c_truth),
+        label=f"{mat_name} (Symbolic)",
+        c="#77A6F2",
+        ls=":",
+        lw=2.5,
+    )
+    df = pd.read_csv("../../outputs/dogbone-2025-10-06-14-30-33-A/records.csv")
+    ax.plot(
+        df["stretch"] + 1,
+        -df["Config Dirichlet BC 0_y"],
+        label=f"{mat_name} (Numerical)",
+        c="#77A6F2",
+        lw=1.5,
+    )
+    c_truth = 0.4669
+    mat_name = "DM-50"
+    ax.plot(
+        *plot_once(1, c_truth),
+        label=f"{mat_name} (Symbolic)",
+        c="#638AC9",
+        ls=":",
+        lw=2.5,
+    )
+    df = pd.read_csv("../../outputs/dogbone-2025-10-03-20-59-44-DM50/records.csv")
+    ax.plot(
+        df["stretch"] + 1,
+        -df["Config Dirichlet BC 0_y"],
+        label=f"{mat_name} (Numerical)",
+        c="#638AC9",
+        lw=1.5,
+    )
+    c_truth = 2.0895
+    mat_name = "DM-70"
+    ax.plot(
+        *plot_once(1, c_truth),
+        label=f"{mat_name} (Symbolic)",
+        c="#5171A5",
+        ls=":",
+        lw=2.5,
+    )
+    df = pd.read_csv("../../outputs/dogbone-2025-10-03-20-59-57-DM70/records.csv")
+    ax.plot(
+        df["stretch"] + 1,
+        -df["Config Dirichlet BC 0_y"],
+        label=f"{mat_name} (Numerical)",
+        c="#5171A5",
+        lw=1.5,
+    )
+else:
+    if plot_ref:
+        df = pd.read_csv(f"{mat_name}-0.9e-1.csv", sep=", ")
+        ax.plot(df["x"], df["y"], label="0.9e-1 (Steven)", c="#5171A5", ls=":", lw=2.5)
 
-df = pd.read_csv(f"{mat_name}-0.9e-2.csv", sep=", ")
-ax.plot(df["x"], df["y"], label="0.9e-2 (Steven)", c="#638AC9", ls=":", lw=2.5)
+        df = pd.read_csv(f"{mat_name}-0.9e-2.csv", sep=", ")
+        ax.plot(df["x"], df["y"], label="0.9e-2 (Steven)", c="#638AC9", ls=":", lw=2.5)
 
-df = pd.read_csv(f"{mat_name}-0.9e-3.csv", sep=", ")
-ax.plot(df["x"], df["y"], label="0.9e-3 (Steven)", c="#77A6F2", ls=":", lw=2.5)
+        df = pd.read_csv(f"{mat_name}-0.9e-3.csv", sep=", ")
+        ax.plot(df["x"], df["y"], label="0.9e-3 (Steven)", c="#77A6F2", ls=":", lw=2.5)
 
-ax.plot(*plot_once(0.9e-1, c_truth), label="0.9e-1", c="#5171A5", lw=1.5)
-ax.plot(*plot_once(0.9e-2, c_truth), label="0.9e-2", c="#638AC9", lw=1.5)
-ax.plot(*plot_once(0.9e-3, c_truth), label="0.9e-3", c="#77A6F2", lw=1.5)
-ax.set_xlim([1.0, 2.5])
+    if disable_integration:
+        ax.plot(*plot_once(1, c_truth), label="Symbolic", c="#5171A5", lw=1.5)
+    else:
+        ax.plot(*plot_once(0.9e-1, c_truth), label="0.9e-1", c="#5171A5", lw=1.5)
+        ax.plot(*plot_once(0.9e-2, c_truth), label="0.9e-2", c="#638AC9", lw=1.5)
+        ax.plot(*plot_once(0.9e-3, c_truth), label="0.9e-3", c="#77A6F2", lw=1.5)
+ax.set_xlim([1.0, 3.0])
 ax.set_ylim([0, 3])
 ax.set_xlabel("Stretch " + r"$\xi$")
 ax.set_ylabel(r"$\sigma_{11}$" + " (MPa)")
-plt.legend(frameon=False, fontsize="small")
+plt.legend(frameon=False, fontsize=7)
 plt.tight_layout()
-plt.savefig(f"{mat_name}.pdf")
-plt.close
+plt.savefig(
+    "all_in_one.pdf"
+    if plot_all_in_one
+    else f"{mat_name}{'' if not disable_integration else '_noint'}.pdf"
+)
+plt.close()
