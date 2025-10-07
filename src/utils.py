@@ -102,9 +102,14 @@ def project(expression, target_space, name="projected"):
 
     v = ufl.TestFunction(target_space)
     u_proj = fem.Function(target_space, name=name)
-    a = ufl.inner(ufl.TrialFunction(target_space), v) * ufl.dx
-    L = ufl.inner(expression, v) * ufl.dx
 
+    # Use reduced quadrature degree to avoid excessive memory in JIT compilation
+    # For DG0, quadrature degree 2 is sufficient
+    dx_proj = ufl.dx(metadata={"quadrature_degree": 2})
+    a = ufl.inner(ufl.TrialFunction(target_space), v) * dx_proj
+    L = ufl.inner(expression, v) * dx_proj
+
+    # Use efficient solver settings for projection
     problem = LinearProblem(a, L)
     u_proj = problem.solve()
     u_proj.name = name
