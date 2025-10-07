@@ -3,10 +3,13 @@ import ufl
 import basix.ufl
 from src.default_config import params
 from src.neoHookean import NeoHookean
+from src.neoHookean_topo_opt import NeoHookeanTopoOpt
 from src.utils import project
 import numpy as np
 from mpi4py import MPI
 from src.solvers import solve_nonlinear_problem
+from dolfinx.la import InsertMode
+import warnings
 
 
 class NeoHookeanIncompressible(NeoHookean):
@@ -98,6 +101,59 @@ class NeoHookeanIncompressible(NeoHookean):
         # Projection to P1 is handled in write_vtu if needed
         point_data = super()._get_point_data(main_field=u)
         point_data["pressure"] = p
+        return point_data
+
+
+class NeoHookeanIncompressibleTopoOpt(NeoHookeanTopoOpt, NeoHookeanIncompressible):
+    def __init__(self, *args, **kwargs):
+        NeoHookeanIncompressible.__init__(self, *args, **kwargs)
+
+        # Defined optimized variable
+        self.filtered_gradient = fem.Function(self.V_e, name="Filtered gradient")
+
+        # Initialize optimization related variables
+        self._initial_strain_energy_density = None
+        self._initial_weight_constraint = None
+        self.penalty = self.params.init_penalty
+
+        warnings.warn(
+            "NeoHookeanIncompressibleTopoOpt becomes unstable as penalty increases and density decreases, unless another strain energy density is used.",
+            UserWarning,
+            stacklevel=2,
+        )
+
+    def _strain_energy_density(self, F=None, C=None, Eps=None):
+        to_3d = lambda x: (
+            ufl.as_tensor([[x[0, 0], x[0, 1], 0], [x[1, 0], x[1, 1], 0], [0, 0, 1]])
+            if self.params.dim == 2
+            else x
+        )
+
+        if Eps is None:
+            if F is None:
+                F = self._deformation_gradient()
+            if C is None:
+                C = self._right_cauchy_green(F=F)
+            F = to_3d(F)
+            C = to_3d(C)
+            J = ufl.det(F)
+        else:
+            C = 2.0 * Eps + ufl.Identity(len(self.u))
+            C = to_3d(C)
+            J = ufl.sqrt(ufl.det(C))
+        Ic = ufl.tr(C)
+
+        # Elasticity parameters
+        degraded_E = self.e**self.penalty * self.params.E
+        mu = degraded_E / (2 * (1 + 0.5))  # Lame second coefficient
+
+        # Stored strain energy density (compressible neo-Hookean model)
+        psi = (mu / 2) * (Ic - 3) - mu * ufl.ln(J) + self.p * (J - 1)
+        return psi
+
+    def _get_point_data(self, main_field=None):
+        point_data = NeoHookeanIncompressible._get_point_data(self, main_field)
+        point_data["Filtered gradient"] = self.filtered_gradient
         return point_data
 
 
