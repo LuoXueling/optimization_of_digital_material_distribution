@@ -401,27 +401,40 @@ class NeoHookean:
         self.log("Solving gradient")
         self.mesh.comm.Barrier()
         self._set_optimized_variable(x)
+
+        # Check if V_u is a subspace (from mixed space) by trying to collapse
+        try:
+            _ = self.V_u.collapse()
+            state_var = self.w
+            state_space = self.V_w
+        except (RuntimeError, AttributeError):
+            state_var = self.u
+            state_space = self.V_u
+
         # Solve \partial L/\partial u = 0 for \lambda. It's a linear equation.
         j = self._objective_function()
-        dj_du_ufl = -ufl.derivative(j, self.u, self.u_test)
-
-        lagrangian = fem.Function(
-            self.V_u
-        )  # Lagrangian multipliers share the same space as u
-        l_test = ufl.TrialFunction(self.V_u)
         Pi = self._potential_energy()
-        lhs_ufl = ufl.derivative(
-            ufl.derivative(
-                ufl.derivative(
-                    Pi, self.u, lagrangian
-                ),  # Derivative of potential energy w.r.t. u and inner product with lagrangian
-                self.u,
-                self.u_test,
-            ),  # Derivative w.r.t. u
-            lagrangian,
-            l_test,  # Tangent matrix * l_test
-        )
 
+        dj_du_ufl = -ufl.derivative(j, state_var, ufl.TestFunction(state_space))
+
+        l_solve = ufl.TrialFunction(state_space)
+
+        # lhs_ufl = ufl.derivative(
+        #     ufl.derivative(
+        #         ufl.derivative(
+        #             Pi, self.u, lagrangian
+        #         ),  # Derivative of potential energy w.r.t. u and inner product with lagrangian
+        #         self.u,
+        #         self.u_test,
+        #     ),  # Derivative w.r.t. u
+        #     lagrangian,
+        #     l_test,  # Tangent matrix * l_test
+        # )
+        lhs_ufl = ufl.derivative(
+            ufl.derivative(Pi, state_var, ufl.TestFunction(state_space)),
+            state_var,
+            l_solve,
+        )
         # No values at DirichletBC boundaries
         bcs = self._define_dirichlet_boundaries(fixed_value=0.0)
 
@@ -447,7 +460,7 @@ class NeoHookean:
         dj_dp.scatter_reverse(InsertMode.add)
 
         dfl_dp_form = fem.form(
-            ufl.derivative(ufl.derivative(Pi, self.u, lagrangian), self.e, v_e)
+            ufl.derivative(ufl.derivative(Pi, state_var, lagrangian), self.e, v_e)
         )
         dfl_dp = fem.assemble_vector(dfl_dp_form)
         dfl_dp.scatter_reverse(InsertMode.add)
