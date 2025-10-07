@@ -33,6 +33,7 @@ class NeoHookeanIncompressible(NeoHookean):
 
         # Override V_u to point to the displacement subspace for boundary conditions
         self.V_u = self.V_w.sub(0)
+        self.V_p = self.V_w.sub(1)
 
         self.dirichlet_bcs = self._define_dirichlet_boundaries()
 
@@ -77,7 +78,7 @@ class NeoHookeanIncompressible(NeoHookean):
         Ic = ufl.tr(C)
 
         # Elasticity parameters
-        mu = self.params.E / (2 * (1 + self.params.nu))  # Lame second coefficient
+        mu = self.params.E / (2 * (1 + 0.5))  # Lame second coefficient
 
         # Stored strain energy density (incompressible neo-Hookean model)
         psi = (mu / 2) * (Ic - 3) - mu * ufl.ln(J) + self.p * (J - 1)

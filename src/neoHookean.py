@@ -69,7 +69,7 @@ class NeoHookean:
         local_area = fem.assemble_scalar(
             fem.form(
                 1.0
-                * ufl.dx(
+                * self.dx(
                     metadata={"quadrature_degree": self.params.q_deg}, domain=self.mesh
                 )
             )
@@ -279,7 +279,7 @@ class NeoHookean:
 
                     bc_func = fem.Function(V_component)
                     if fixed_value is not None:
-                        bc_func.x.array[:] = 0.0
+                        bc_func.x.array[:] = fixed_value
                     else:
                         if hasattr(component_val, "value"):
                             bc_func.x.array[:] = component_val.value
@@ -308,7 +308,7 @@ class NeoHookean:
                     # For subspaces, use Function instead of Constant
                     bc_func = fem.Function(V_u_collapsed)
                     if fixed_value is not None:
-                        bc_func.x.array[:] = 0.0
+                        bc_func.x.array[:] = fixed_value
                     else:
                         bc_func.interpolate(
                             lambda x: np.tile(val.value, (x.shape[1], 1)).T
@@ -324,7 +324,8 @@ class NeoHookean:
                     # For regular spaces, use Constant
                     if fixed_value is not None:
                         bc_val = fem.Constant(
-                            self.mesh, ScalarType([0.0] * self.mesh.geometry.dim)
+                            self.mesh,
+                            ScalarType([fixed_value] * self.mesh.geometry.dim),
                         )
                     else:
                         bc_val = val
@@ -335,7 +336,7 @@ class NeoHookean:
                     if len(facets) > 0:
                         bc = fem.dirichletbc(bc_val, dofs, self.V_u)
                         dirichlet_bcs.append(bc)
-
+        self.log(f"Found facets for Dirichlet BCs: {marker_facets_num}")
         return dirichlet_bcs
 
     def forward(self):
@@ -707,7 +708,7 @@ class NeoHookean:
         return tractions
 
     def record_traction_dirichlet(self, type="PK1", step=0):
-        tractions = self.compute_traction_dirichlet(type="PK1")
+        tractions = self.compute_traction_dirichlet(type=type)
         for name, values in tractions.items():
             for val, dir in zip(
                 values, ["x", "y"] + (["z"] if len(values) == 3 else [])
