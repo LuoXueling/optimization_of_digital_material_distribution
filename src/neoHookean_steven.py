@@ -10,30 +10,11 @@ class NeoHookeanSteven(NeoHookeanIncompressible):
         super().__init__(*args, **kwargs)
         self.e.x.array[:] = self.params.c
 
-    def _strain_energy_density(self, F=None, C=None, Eps=None):
-        to_3d = lambda x: (
-            ufl.as_tensor([[x[0, 0], x[0, 1], 0], [x[1, 0], x[1, 1], 0], [0, 0, 1]])
-            if self.params.dim == 2
-            else x
-        )
+    def _get_c(self):
+        return self.params.c
 
-        if Eps is None:
-            if F is None:
-                F = self._deformation_gradient()
-            if C is None:
-                C = self._right_cauchy_green(F=F)
-            F = to_3d(F)
-            C = to_3d(C)
-            J = ufl.det(F)
-        else:
-            C = 2.0 * Eps + ufl.Identity(len(self.u))
-            C = to_3d(C)
-            J = ufl.sqrt(ufl.det(C))
-        Cbar = J ** (-2 / 3) * C
-        I1 = ufl.tr(Cbar)
-        I2 = 0.5 * (I1**2 - ufl.tr(Cbar * Cbar))
-
-        c = self.e
+    def _strain_energy_density_wo_constraint(self):
+        c = self._get_c()
 
         a1 = 6.84602
         a2 = 6.86996
@@ -79,6 +60,32 @@ class NeoHookeanSteven(NeoHookeanIncompressible):
             )
             + 0.809351 * ufl.ln(ufl.exp(0.009634 * I1) + 1)
         )
+        return psi_nn
+
+    def _strain_energy_density(self, F=None, C=None, Eps=None):
+        to_3d = lambda x: (
+            ufl.as_tensor([[x[0, 0], x[0, 1], 0], [x[1, 0], x[1, 1], 0], [0, 0, 1]])
+            if self.params.dim == 2
+            else x
+        )
+
+        if Eps is None:
+            if F is None:
+                F = self._deformation_gradient()
+            if C is None:
+                C = self._right_cauchy_green(F=F)
+            F = to_3d(F)
+            C = to_3d(C)
+            J = ufl.det(F)
+        else:
+            C = 2.0 * Eps + ufl.Identity(len(self.u))
+            C = to_3d(C)
+            J = ufl.sqrt(ufl.det(C))
+        Cbar = J ** (-2 / 3) * C
+        I1 = ufl.tr(Cbar)
+        I2 = 0.5 * (I1**2 - ufl.tr(Cbar * Cbar))
+
+        psi_nn = self._strain_energy_density_wo_constraint()
         psi = psi_nn(I1, I2) - psi_nn(3, 3) + self.p * (J - 1)
         return psi
 
@@ -87,6 +94,9 @@ class NeoHookeanStevenStaggered(NeoHookeanIncompressibleStaggered):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.e.x.array[:] = self.params.c
+
+    def _get_c(self):
+        return self.params.c
 
     def _strain_energy_density(self, *args, **kwargs):
         return NeoHookeanSteven._strain_energy_density(self, *args, **kwargs)
