@@ -23,6 +23,7 @@ def redirect_stdout_to_log(log_file_path):
     def tee_with_ansi_strip(input_fd, output_fd, log_path):
         # Use bytes pattern for bytes data
         ansi_escape = re.compile(rb"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
+        petsc_krylov_pattern = re.compile(rb".*PETSc Krylov solver.*")
         try:
             with os.fdopen(input_fd, "rb", buffering=0) as inp, os.fdopen(
                 output_fd, "wb", buffering=0
@@ -31,10 +32,16 @@ def redirect_stdout_to_log(log_file_path):
                     data = inp.read(1024)
                     if not data:
                         break
-                    out.write(data)  # Write to terminal with colors
+                    # Filter out lines containing "PETSc Krylov solver"
+                    lines = data.split(b"\n")
+                    filtered_lines = [
+                        line for line in lines if not petsc_krylov_pattern.match(line)
+                    ]
+                    filtered_data = b"\n".join(filtered_lines)
+                    out.write(filtered_data)  # Write to terminal with colors
                     out.flush()
                     # Strip ANSI codes for log file
-                    cleaned = ansi_escape.sub(b"", data)
+                    cleaned = ansi_escape.sub(b"", filtered_data)
                     log.write(cleaned)
                     log.flush()
         except Exception as e:
