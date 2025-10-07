@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import copy
 import os
 from src.utils import project
+from scipy.spatial import cKDTree
 
 
 class NeoHookeanTopoOpt(NeoHookean):
@@ -209,42 +210,58 @@ class NeoHookeanTopoOpt(NeoHookean):
     def grad(self, x):
         grad = super().grad(x)
 
-        # Create temporary function for gradient to access ghost values
-        grad_func = fem.Function(self.V_e)
-        grad_func.x.array[:] = grad
-        grad_func.x.scatter_forward()
         # Zero out gradient at boundary DOFs where density is fixed
         fem.set_bc(grad, self.gradient_dirichlet_bcs)
 
-        # Deal with the gradient of density: filter method
-        coord = self.V_e.tabulate_dof_coordinates()
+        if self.params.r_min is not None:
+            # Create temporary function for gradient to access ghost values
+            grad_func = fem.Function(self.V_e)
+            grad_func.x.array[:] = grad
+            grad_func.x.scatter_forward()
 
-        # Get number of locally owned DOFs
-        num_owned = self.V_e.dofmap.index_map.size_local
+            # Deal with the gradient of density: filter method (sparse KD-tree approach)
+            coord = self.V_e.tabulate_dof_coordinates()
+            num_owned = self.V_e.dofmap.index_map.size_local
 
-        filtered_grad = copy.deepcopy(grad)
+            # Build KD-tree for efficient neighbor search
+            tree = cKDTree(coord)
 
-        # Only compute filtered gradient for locally owned DOFs
-        for p in range(num_owned):
-            p_pos = coord[p, :]
-            pdist2 = np.sqrt(
-                np.sum(
-                    (coord - np.repeat(p_pos.reshape(1, -1), coord.shape[0], axis=0))
-                    ** 2,
-                    axis=-1,
-                )
-            )
-            within_filter = np.where(pdist2 <= self.params.r_min)[0]
-            distances = pdist2[within_filter]
-            grads = grad_func.x.array[within_filter]
-            densities = self.e.x.array[within_filter]
-            weights = self.params.r_min - distances
-            # if max(x[p] - np.min(densities), np.max(densities) - x[p]) > 0.1:
-            p_grad = np.sum(weights * densities * grads) / (self.e.x.array[p] * np.sum(weights))
-            filtered_grad[p] = p_grad
+            # Query neighbors within r_min for each owned DOF
+            owned_coords = coord[:num_owned, :]
+            neighbors_list = tree.query_ball_point(owned_coords, self.params.r_min)
 
-        filtered_grad = np.clip(filtered_grad, a_min=-0.2, a_max=0.2)
-        grad = filtered_grad
+            # Compute filtered gradient using sparse approach
+            filtered_grad = copy.deepcopy(grad)
+
+            for p in range(num_owned):
+                neighbor_indices = neighbors_list[p]
+                if len(neighbor_indices) == 0:
+                    continue
+
+                # Get neighbor coordinates, distances, and values
+                neighbor_coords = coord[neighbor_indices]
+                distances = np.linalg.norm(neighbor_coords - owned_coords[p], axis=1)
+
+                # Compute weights
+                weights = self.params.r_min - distances
+
+                # Get gradient and density values at neighbors
+                grads = grad_func.x.array[neighbor_indices]
+                densities = self.e.x.array[neighbor_indices]
+
+                # Weighted average
+                numerator = np.sum(weights * densities * grads)
+                denominator = self.e.x.array[p] * np.sum(weights)
+
+                if denominator > 1e-12:
+                    filtered_grad[p] = numerator / denominator
+
+            # Clip gradient values
+            filtered_grad = np.clip(filtered_grad, a_min=-0.2, a_max=0.2)
+            grad = filtered_grad
+        else:
+            filtered_grad = copy.deepcopy(grad)
+
         self.filtered_gradient.x.array[:] = filtered_grad
         self.filtered_gradient.x.scatter_forward()
         return grad
