@@ -6,6 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import copy
 import os
+from src.utils import project
 
 
 class NeoHookeanTopoOpt(NeoHookean):
@@ -19,6 +20,13 @@ class NeoHookeanTopoOpt(NeoHookean):
         self._initial_values = {}
         self.penalty = self.params.init_penalty
 
+        # Initialize density Dirichlet BCs
+        self.density_dirichlet_bcs, self.gradient_dirichlet_bcs = (
+            self._define_density_dirichlet_boundaries()
+        )
+
+        # Apply initial BCs to density field
+        self._apply_density_bcs()
 
     def _normalized_scalar_expression(self, expression, name):
         if name not in self._initial_values.keys():
@@ -51,6 +59,116 @@ class NeoHookeanTopoOpt(NeoHookean):
 
     def _bounds(self):
         return [(self.params.min_density, 1.0)] * len(self.e.x.array)
+
+    def _define_density_dirichlet_boundaries(self, num_layers=2):
+        """Define Dirichlet boundary conditions for density field on boundaries
+        where Neumann or Dirichlet BCs are applied to displacement field.
+        Includes DOFs within num_layers element layers from the boundary.
+
+        Args:
+            num_layers: Number of element layers below the boundary to fix (default=2)
+        """
+        density_bcs = []
+        gradient_bcs = []
+
+        # Collect all boundary marker IDs from Neumann and Dirichlet BCs
+        boundary_markers = set()
+
+        # Add Neumann BC markers
+        for marker_id, _ in self.neumann_bcs:
+            boundary_markers.add(marker_id)
+
+        # Add Dirichlet BC markers
+        if self.params.dirichlet_bcs is not None:
+            for marker_id, _ in self.params.dirichlet_bcs:
+                boundary_markers.add(marker_id)
+
+        # Add geometrically-defined Dirichlet BC markers
+        if self.params.dirichlet_bcs_dict is not None:
+            for i in range(len(self.params.dirichlet_bcs_dict)):
+                marker_key = f"Config Dirichlet BC {i}"
+                if marker_key in self.association_table:
+                    boundary_markers.add(self.association_table[marker_key])
+
+        # Get DOF coordinates (includes ghost DOFs for parallel safety)
+        dof_coords = self.V_e.tabulate_dof_coordinates()
+
+        # Get number of locally owned DOFs
+        num_owned = self.V_e.dofmap.index_map.size_local
+
+        # Collect all DOFs to fix (only locally owned)
+        all_dofs_to_fix = set()
+
+        for marker_id in boundary_markers:
+            facets = self.boundaries.find(marker_id)
+            if len(facets) > 0:
+                # Locate DOFs on boundary facets
+                boundary_dofs = fem.locate_dofs_topological(
+                    self.V_e, self.mesh.topology.dim - 1, facets
+                )
+
+                # Get coordinates of boundary DOFs (may include ghost DOFs)
+                boundary_coords = dof_coords[boundary_dofs]
+
+                # Calculate characteristic element size from boundary DOFs
+                if len(boundary_coords) > 1:
+                    # Estimate element size as minimum distance between boundary DOFs
+                    dist_matrix = np.linalg.norm(
+                        boundary_coords[:, None, :] - boundary_coords[None, :, :],
+                        axis=2,
+                    )
+                    # Set diagonal to large value to avoid self-distance
+                    np.fill_diagonal(dist_matrix, np.inf)
+                    min_distances = np.min(dist_matrix, axis=1)
+                    h = np.min(min_distances[np.isfinite(min_distances)])
+                else:
+                    h = 0.0
+
+                # Expand region by num_layers * h
+                search_distance = num_layers * h
+
+                # Find all locally owned DOFs within search_distance from any boundary DOF
+                for i in range(num_owned):
+                    dof_pos = dof_coords[i]
+                    # Calculate minimum distance to any boundary DOF
+                    distances = np.linalg.norm(boundary_coords - dof_pos, axis=1)
+                    min_dist = np.min(distances)
+
+                    if min_dist <= search_distance:
+                        all_dofs_to_fix.add(i)
+
+        # Create BCs with all collected DOFs (only locally owned)
+        if len(all_dofs_to_fix) > 0:
+            dofs_array = np.array(list(all_dofs_to_fix), dtype=np.int32)
+
+            # Create BC for density with fixed value 1.0
+            bc_func_density = fem.Function(self.V_e)
+            bc_func_density.x.array[:] = 1.0
+            bc_density = fem.dirichletbc(bc_func_density, dofs_array)
+            density_bcs.append(bc_density)
+
+            # Create BC for gradient with fixed value 0.0
+            bc_func_gradient = fem.Function(self.V_e)
+            bc_func_gradient.x.array[:] = 0.0
+            bc_gradient = fem.dirichletbc(bc_func_gradient, dofs_array)
+            gradient_bcs.append(bc_gradient)
+
+        # Parallel-safe: sum across all processes
+        total_dofs_fixed = self.mesh.comm.allreduce(len(all_dofs_to_fix), op=MPI.SUM)
+        self.log(
+            f"Created density Dirichlet BCs fixing {total_dofs_fixed} DOFs (including {num_layers} layers from boundaries)"
+        )
+        return density_bcs, gradient_bcs
+
+    def _apply_density_bcs(self):
+        """Apply Dirichlet boundary conditions to density field."""
+        fem.set_bc(self.e.x.array, self.density_dirichlet_bcs)
+        self.e.x.scatter_forward()
+
+    def _set_optimized_variable(self, x: np.ndarray):
+        """Override to apply density BCs after setting values."""
+        super()._set_optimized_variable(x)
+        self._apply_density_bcs()
 
     def _strain_energy_density(self, F=None, C=None, Eps=None):
         to_3d = lambda x: (
@@ -95,6 +213,8 @@ class NeoHookeanTopoOpt(NeoHookean):
         grad_func = fem.Function(self.V_e)
         grad_func.x.array[:] = grad
         grad_func.x.scatter_forward()
+        # Zero out gradient at boundary DOFs where density is fixed
+        fem.set_bc(grad, self.gradient_dirichlet_bcs)
 
         # Deal with the gradient of density: filter method
         coord = self.V_e.tabulate_dof_coordinates()
@@ -165,3 +285,13 @@ class NeoHookeanTopoOpt(NeoHookean):
         point_data = super()._get_point_data(main_field)
         point_data["Filtered gradient"] = self.filtered_gradient
         return point_data
+
+    def _get_cell_data(self):
+        cell_data = super()._get_cell_data()
+        scalar_space = fem.functionspace(self.mesh, ("DG", 0))
+
+        grad_projected = project(
+            self.filtered_gradient, scalar_space, "Gradient_projected"
+        )
+        cell_data["Gradient_projected"] = grad_projected
+        return cell_data
