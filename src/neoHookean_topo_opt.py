@@ -18,7 +18,7 @@ class NeoHookeanTopoOpt(NeoHookean):
         self.filtered_gradient = fem.Function(self.V_e, name="Filtered gradient")
 
         # Initialize optimization related variables
-        self._initial_values = {}
+        self._initial_objective_values = {}
         self.penalty = self.params.init_penalty
 
         # Initialize density Dirichlet BCs
@@ -30,19 +30,20 @@ class NeoHookeanTopoOpt(NeoHookean):
         self._apply_density_bcs()
 
     def _normalized_scalar_expression(self, expression, name):
-        if name not in self._initial_values.keys():
-            local_val = fem.assemble_scalar(fem.form(expression))
-            self._initial_values[name] = self.mesh.comm.allreduce(local_val, op=MPI.SUM)
-        normalized_scalar = 1 / self._initial_values[name] * expression
+        if name not in self._initial_objective_values.keys():
+            self._initial_objective_values[name] = self._assemble_scalar_parallel(
+                expression
+            )
+        normalized_scalar = 1 / self._initial_objective_values[name] * expression
         return normalized_scalar
 
     def _objective_function(self):
         stored_energy = self._normalized_scalar_expression(
-            self._strain_energy_density() * self.dx
+            self._strain_energy_density() * self.dx, "stored_energy"
         )
         softplus = lambda x: ufl.ln(1 + ufl.exp(10 * x)) / 10
         weight = 50 * self._normalized_scalar_expression(
-            softplus(self.e - self.params.target_volume) * self.dx
+            softplus(self.e - self.params.target_volume) * self.dx, "weight"
         )
         gray_level = 20 * self.e * (1.0 - self.e) * 4 / self.area * self.dx
 
