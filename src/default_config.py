@@ -48,30 +48,39 @@ params.update(
         # Mark Dirichlet boundary subdomains and values
         # dirichlet_bcs_dict: Define Dirichlet BCs using geometric marker functions
         #   - Key: lambda function that marks boundary (e.g., lambda x: np.isclose(x[0], 0.0))
-        #   - Value: Either a full-vector Constant (all components) OR a dict for component-wise BCs
+        #   - Value: fem.Constant, callable function, or dict for component-wise BCs
         #
-        #   Full-vector example (constrains all displacement components):
+        #   Constant example:
         #     lambda x: np.isclose(x[0], 0.0): fem.Constant(_mesh, ScalarType((0.0, 0.0)))
-        #
-        #   Component-wise example (constrains only specific components):
-        #     lambda x: np.isclose(x[0], 0.0): {0: 0.0}  # Only constrains u_x = 0.0
-        #     lambda x: np.isclose(x[1], 0.0): {1: fem.Constant(_mesh, ScalarType(0.0))}  # Only constrains u_y
-        #     lambda x: np.isclose(x[0], width): {0: 0.1, 1: 0.0}  # Constrains both u_x and u_y
+        #   Function example (spatially-varying):
+        #     lambda x: np.isclose(x[0], width): lambda x: np.vstack([np.zeros_like(x[0]), -0.01*(x[1]-0.5)**2])
+        #   Component-wise example:
+        #     lambda x: np.isclose(x[0], 0.0): {0: 0.0, 1: lambda x: 0.01*x[0]}  # u_x=0, u_y varies
         dirichlet_bcs_dict={
-            lambda x: np.isclose(x[0], 0.0): fem.Constant(_mesh, ScalarType((0.0, 0.0))),  # Modify for 3D
+            lambda x: np.isclose(x[0], 0.0): fem.Constant(
+                _mesh, ScalarType((0.0, 0.0))
+            ),  # Modify for 3D
         },
         # Mark Neumann boundary subdomains and values
+        # It has a syntax similar to dirichlet_bcs_dict, except that only the Constant and Function is supported
         neumann_bcs_dict={
-            lambda x: np.isclose(x[0], params.width) & np.isclose(x[1], params.height / 2, atol=params.height / 8 / 2): fem.Constant(_mesh, ScalarType((0.0, -0.0001))),  # Modify for 3D
+            lambda x: np.isclose(x[0], params.width)
+            & np.isclose(
+                x[1], params.height / 2, atol=params.height / 8 / 2
+            ): fem.Constant(
+                _mesh, ScalarType((0.0, -0.0001))
+            ),  # Modify for 3D
         },
         # An alternative to define Dirichlet/Neumann boundaries by using msh2xdmf.py
         # This approach can be used together with dirichlet_bcs_dict and neumann_bcs_dict
         boundaries=None,  # boundaries is a MeshTags with some boundaries marked for neumann bcs
         association_table=None,  # A dict that maps boundary names to boundary id
-        neumann_bcs=None,  # a list of tuples (boundary_id, (f_x, f_y, f_z)).
         # dirichlet_bcs: Define Dirichlet BCs using boundary marker IDs (from MeshTags)
         #   Format: list of tuples (marker_id, value) where value follows same format as dirichlet_bcs_dict
         #   Examples: [(1, fem.Constant(_mesh, ScalarType((0.0, 0.0))))] or [(1, {0: 0.0}), (2, {1: 0.0})]
         dirichlet_bcs=None,
+        # neumann_bcs has a syntax similar to dirichlet_bcs, except that only the Constant and Function is supported
+        neumann_bcs=None,
+        # dirichlet_bcs_dict and neumann_bcs_dict will be merged into dirichlet_bcs and neumann_bcs
     )
 )

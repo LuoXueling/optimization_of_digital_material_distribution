@@ -140,9 +140,22 @@ class NeoHookean:
             if self.params.association_table is not None
             else {}
         )
-        self.neumann_bcs = (
+        self.neumann_bcs = []
+        # Check if V_u is a subspace (from mixed space) by trying to collapse
+        try:
+            V_u_collapsed, _ = self.V_u.collapse()
+        except RuntimeError:
+            V_u_collapsed = self.V_u
+        for marker_id, val in (
             self.params.neumann_bcs if self.params.neumann_bcs is not None else []
-        )
+        ):
+            if callable(val) and not isinstance(val, (fem.Constant, fem.Expression)):
+                # Convert function to fem.Function
+                neumann_func = fem.Function(V_u_collapsed)
+                neumann_func.interpolate(val)
+                self.neumann_bcs.append((marker_id, neumann_func))
+            else:
+                self.neumann_bcs.append((marker_id, val))
 
         # For geometrically defined boundaries, create MeshTags
         self.mesh.topology.create_connectivity(
@@ -194,9 +207,18 @@ class NeoHookean:
                 self.mesh, self.mesh.topology.dim - 1, marker_func
             )
 
-            # Add to neumann_bcs list if Neumann
+            # Add to neumann_bcs list directly if Neumann
             if bc_type == "Neumann":
-                self.neumann_bcs.append((marker_id, val))
+                # Check if val is callable (a function of coordinates)
+                if callable(val) and not isinstance(
+                    val, (fem.Constant, fem.Expression)
+                ):
+                    # Convert function to fem.Function
+                    neumann_func = fem.Function(self.V_u)
+                    neumann_func.interpolate(val)
+                    self.neumann_bcs.append((marker_id, neumann_func))
+                else:
+                    self.neumann_bcs.append((marker_id, val))
 
             if len(facets) > 0:
                 # Update boundaries MeshTags
@@ -224,9 +246,21 @@ class NeoHookean:
 
         for i, val in self.neumann_bcs:
             forces = []
-            for x in val:
-                global_force = self._assemble_scalar_parallel(x * self.boundary_ds(i))
-                forces.append(global_force)
+            # Check if val is a fem.Function (spatially-varying) or has iterable components
+            if isinstance(val, fem.Function):
+                # For fem.Function, compute integral of each component
+                for comp in range(self.mesh.geometry.dim):
+                    global_force = self._assemble_scalar_parallel(
+                        val[comp] * self.boundary_ds(i)
+                    )
+                    forces.append(global_force)
+            else:
+                # For Constant or similar, iterate over components
+                for x in val:
+                    global_force = self._assemble_scalar_parallel(
+                        x * self.boundary_ds(i)
+                    )
+                    forces.append(global_force)
             self.log(f"Applying Neumann boundary {i}: {forces}")
 
     def _assemble_scalar_parallel(self, expression):
@@ -285,8 +319,14 @@ class NeoHookean:
                     if fixed_value is not None:
                         bc_func.x.array[:] = fixed_value
                     else:
+                        # Check if component_val is a Constant or Expression first
                         if hasattr(component_val, "value"):
                             bc_func.x.array[:] = component_val.value
+                        elif callable(component_val) and not isinstance(
+                            component_val, (fem.Constant, fem.Expression)
+                        ):
+                            # Function of coordinates
+                            bc_func.interpolate(component_val)
                         else:
                             bc_func.x.array[:] = component_val
 
@@ -314,9 +354,20 @@ class NeoHookean:
                     if fixed_value is not None:
                         bc_func.x.array[:] = fixed_value
                     else:
-                        bc_func.interpolate(
-                            lambda x: np.tile(val.value, (x.shape[1], 1)).T
-                        )
+                        # Check if val is a Constant or Expression first
+                        if hasattr(val, "value"):
+                            bc_func.interpolate(
+                                lambda x: np.tile(val.value, (x.shape[1], 1)).T
+                            )
+                        elif callable(val) and not isinstance(
+                            val, (fem.Constant, fem.Expression)
+                        ):
+                            # Function of coordinates
+                            bc_func.interpolate(val)
+                        else:
+                            bc_func.interpolate(
+                                lambda x: np.tile(val.value, (x.shape[1], 1)).T
+                            )
 
                     dofs = fem.locate_dofs_topological(
                         (self.V_u, V_u_collapsed), self.mesh.topology.dim - 1, facets
@@ -325,21 +376,39 @@ class NeoHookean:
                         bc = fem.dirichletbc(bc_func, dofs, self.V_u)
                         dirichlet_bcs.append(bc)
                 else:
-                    # For regular spaces, use Constant
+                    # For regular spaces
                     if fixed_value is not None:
                         bc_val = fem.Constant(
                             self.mesh,
                             ScalarType([fixed_value] * self.mesh.geometry.dim),
                         )
+                        dofs = fem.locate_dofs_topological(
+                            self.V_u, self.mesh.topology.dim - 1, facets
+                        )
+                        if len(facets) > 0:
+                            bc = fem.dirichletbc(bc_val, dofs, self.V_u)
+                            dirichlet_bcs.append(bc)
+                    elif callable(val) and not isinstance(
+                        val, (fem.Constant, fem.Expression)
+                    ):
+                        # Function-based BC: create a Function and interpolate
+                        bc_func = fem.Function(self.V_u)
+                        bc_func.interpolate(val)
+                        dofs = fem.locate_dofs_topological(
+                            self.V_u, self.mesh.topology.dim - 1, facets
+                        )
+                        if len(facets) > 0:
+                            bc = fem.dirichletbc(bc_func, dofs)
+                            dirichlet_bcs.append(bc)
                     else:
+                        # Constant value (fem.Constant or similar)
                         bc_val = val
-
-                    dofs = fem.locate_dofs_topological(
-                        self.V_u, self.mesh.topology.dim - 1, facets
-                    )
-                    if len(facets) > 0:
-                        bc = fem.dirichletbc(bc_val, dofs, self.V_u)
-                        dirichlet_bcs.append(bc)
+                        dofs = fem.locate_dofs_topological(
+                            self.V_u, self.mesh.topology.dim - 1, facets
+                        )
+                        if len(facets) > 0:
+                            bc = fem.dirichletbc(bc_val, dofs, self.V_u)
+                            dirichlet_bcs.append(bc)
         self.log(f"Found facets for Dirichlet BCs: {marker_facets_num}")
         return dirichlet_bcs
 
