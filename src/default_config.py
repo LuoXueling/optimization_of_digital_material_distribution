@@ -12,7 +12,6 @@ params = dotdict(
     output_root="outputs",
     # FEM settings
     dim=2,
-    plane_state="stress",
     q_deg=2,
     elem_order=1,
     # Geometry settings
@@ -23,6 +22,7 @@ params = dotdict(
     output_per_step=10,
     maxiter=10000,
     lr=1,
+    clip_gradient=0.2,  # clipping acts on lr-scaled gradients
     # Solver settings
     relative_tol=0.001,
     # Elasticity parameters
@@ -44,7 +44,9 @@ params.update(
     dotdict(
         mesh=_mesh,
         # Body force
-        B=fem.Constant(_mesh, ScalarType((0.0, 0.0))),  # Body force per unit volume # Modify for 3D
+        B=fem.Constant(
+            _mesh, ScalarType((0.0, 0.0))
+        ),  # Body force per unit volume # Modify for 3D
         # Mark Dirichlet boundary subdomains and values
         # dirichlet_bcs_dict: Define Dirichlet BCs using geometric marker functions
         #   - Key: lambda function that marks boundary (e.g., lambda x: np.isclose(x[0], 0.0))

@@ -62,7 +62,7 @@ class NeoHookeanTopoOpt(NeoHookean):
     def _bounds(self):
         return [(self.params.min_density, 1.0)] * len(self.e.x.array)
 
-    def _define_density_dirichlet_boundaries(self, num_layers=2):
+    def _define_density_dirichlet_boundaries(self):
         """Define Dirichlet boundary conditions for density field on boundaries
         where Neumann or Dirichlet BCs are applied to displacement field.
         Includes DOFs within num_layers element layers from the boundary.
@@ -72,6 +72,9 @@ class NeoHookeanTopoOpt(NeoHookean):
         """
         density_bcs = []
         gradient_bcs = []
+
+        if self.params.fix_density_layers is None:
+            return density_bcs, gradient_bcs
 
         # Collect all boundary marker IDs from Neumann and Dirichlet BCs
         boundary_markers = set()
@@ -127,7 +130,7 @@ class NeoHookeanTopoOpt(NeoHookean):
                     h = 0.0
 
                 # Expand region by num_layers * h
-                search_distance = num_layers * h
+                search_distance = self.params.fix_density_layers * h
 
                 # Find all locally owned DOFs within search_distance from any boundary DOF
                 for i in range(num_owned):
@@ -158,7 +161,7 @@ class NeoHookeanTopoOpt(NeoHookean):
         # Parallel-safe: sum across all processes
         total_dofs_fixed = self.mesh.comm.allreduce(len(all_dofs_to_fix), op=MPI.SUM)
         self.log(
-            f"Created density Dirichlet BCs fixing {total_dofs_fixed} DOFs (including {num_layers} layers from boundaries)"
+            f"Created density Dirichlet BCs fixing {total_dofs_fixed} DOFs (including {self.params.fix_density_layers} layers from boundaries)"
         )
         return density_bcs, gradient_bcs
 
@@ -258,7 +261,7 @@ class NeoHookeanTopoOpt(NeoHookean):
                     filtered_grad[p] = numerator / denominator
 
             # Clip gradient values
-            filtered_grad = np.clip(filtered_grad, a_min=-0.2, a_max=0.2)
+            # filtered_grad = np.clip(filtered_grad, a_min=-0.2, a_max=0.2)
             grad = filtered_grad
         else:
             filtered_grad = copy.deepcopy(grad)

@@ -551,7 +551,11 @@ class NeoHookean:
             self._loss_history.append(res)
             self._stage_loss_history.append(res)
             grad = self.grad(x)
-            x -= self.params.lr * grad
+            x -= np.clip(
+                self.params.lr * grad,
+                a_min=-self.params.clip_gradient,
+                a_max=self.params.clip_gradient,
+            )
             for j, bound in zip(range(len(x)), self._bounds()):
                 if bound[0] is not None:
                     x[j] = max(bound[0], x[j])
