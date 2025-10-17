@@ -235,6 +235,15 @@ class NeoHookeanTopoOpt(NeoHookean):
         psi = (mu / 2) * (Ic - 3) - mu * ufl.ln(J) + (lmbda / 2) * (ufl.ln(J)) ** 2
         return psi
 
+    def _potential_energy(self, psi=None):
+        if psi is None:
+            psi = self._strain_energy_density()
+        energy = psi * self.dx - self.e * ufl.dot(self.params.B, self.u) * self.dx
+        # Neumann boundaries
+        for i, val in self.neumann_bcs:
+            energy -= ufl.dot(val, self.u) * self.boundary_ds(i)
+        return energy
+
     def grad(self, x=None):
         grad = super().grad(x)
 
