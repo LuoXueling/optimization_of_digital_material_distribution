@@ -437,6 +437,9 @@ class NeoHookean:
     def _objective_function(self):
         raise NotImplementedError()
 
+    def _objective_function_value(self):
+        return self._assemble_scalar_parallel(self._objective_function())
+
     def _set_optimized_variable(self, x: np.ndarray):
         self.e.x.array[:] = x
         self.e.x.scatter_forward()
@@ -460,15 +463,22 @@ class NeoHookean:
         except:
             self._initialize_fields()
             return np.inf
-        loss = self._assemble_scalar_parallel(self._objective_function())
+        loss = self._objective_function_value()
         self.log(f"Loss: {loss}")
         self.mesh.comm.Barrier()
         return loss
 
-    def grad(self, x):
+    def _grad_j_state(self, j, state, state_test):
+        return ufl.derivative(j, state, state_test)
+
+    def _grad_j_opt(self, j, opt, opt_test):
+        return ufl.derivative(j, opt, opt_test)
+
+    def grad(self, x=None):
         self.log("Solving gradient")
         self.mesh.comm.Barrier()
-        self._set_optimized_variable(x)
+        if x is not None:
+            self._set_optimized_variable(x)
 
         # Check if V_u is a subspace (from mixed space) by trying to collapse
         try:
@@ -483,7 +493,7 @@ class NeoHookean:
         j = self._objective_function()
         Pi = self._potential_energy()
 
-        dj_du_ufl = -ufl.derivative(j, state_var, ufl.TestFunction(state_space))
+        dj_du_ufl = -self._grad_j_state(j, state_var, ufl.TestFunction(state_space))
 
         l_solve = ufl.TrialFunction(state_space)
 
@@ -523,7 +533,7 @@ class NeoHookean:
 
         # Compute \partial L/\partial param
         v_e = ufl.TestFunction(self.V_e)
-        dj_dp_form = fem.form(ufl.derivative(j, self.e, v_e))
+        dj_dp_form = fem.form(self._grad_j_opt(j, self.e, v_e))
         dj_dp = fem.assemble_vector(dj_dp_form)
         dj_dp.scatter_reverse(InsertMode.add)
 
@@ -550,7 +560,7 @@ class NeoHookean:
             res = self.eval(x)
             self._loss_history.append(res)
             self._stage_loss_history.append(res)
-            grad = self.grad(x)
+            grad = self.grad()
             x -= np.clip(
                 self.params.lr * grad,
                 a_min=-self.params.clip_gradient,

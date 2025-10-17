@@ -38,23 +38,47 @@ class NeoHookeanTopoOpt(NeoHookean):
         return normalized_scalar
 
     def _objective_function(self):
-        stored_energy = self._normalized_scalar_expression(
+        return None
+
+    def _stored_energy(self):
+        return self._normalized_scalar_expression(
             self._strain_energy_density() * self.dx, "stored_energy"
         )
-        softplus = lambda x: ufl.ln(1 + ufl.exp(10 * x)) / 10
-        weight = 50 * self._normalized_scalar_expression(
-            softplus(self.e - self.params.target_volume) * self.dx, "weight"
-        )
-        gray_level = 20 * self.e * (1.0 - self.e) * 4 / self.area * self.dx
 
+    def _weight_diff(self):
+        return self._normalized_scalar_expression(
+            (self.e - self.params.target_volume) * self.dx, "weight"
+        )
+
+    def _objective_function_value(self):
+        stored_energy = self._stored_energy()
         stored_energy_val = self._assemble_scalar_parallel(stored_energy)
-        weight_val = self._assemble_scalar_parallel(weight)
-        gray_level_val = self._assemble_scalar_parallel(gray_level)
 
-        self.log(
-            f"Stored energy: {stored_energy_val}, weight constraint: {weight_val}, Gray level: {gray_level_val}"
+        softplus = lambda x: np.log(1 + np.exp(100 * x)) / 100
+        weight = self._weight_diff()
+        weight_val = 50 * softplus(self._assemble_scalar_parallel(weight))
+
+        weight_current = self._assemble_scalar_parallel(self.e / self.area * self.dx)
+
+        self.log(f"Stored energy: {stored_energy_val}, weight constraint: {weight_val}")
+        self.log(f"Real weight: {weight_current} ({self.params.target_volume})")
+        return stored_energy_val + weight_val
+
+    def _grad_j_state(self, j, state, state_test):
+        stored_energy = self._stored_energy()
+        return ufl.derivative(stored_energy, state, state_test)
+
+    def _grad_j_opt(self, j, opt, opt_test):
+        stored_energy = self._stored_energy()
+        weight_diff_form = self._weight_diff()
+        softplus_diff = (
+            50
+            * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
+                self._assemble_scalar_parallel(weight_diff_form)
+            )
+            * ufl.derivative(self.e * self.dx, opt, opt_test)
         )
-        return stored_energy + weight + gray_level
+        return ufl.derivative(stored_energy, opt, opt_test) + softplus_diff
 
     def _initial_values(self):
         return np.array([1.0] * len(self.e.x.array))
@@ -211,13 +235,13 @@ class NeoHookeanTopoOpt(NeoHookean):
         psi = (mu / 2) * (Ic - 3) - mu * ufl.ln(J) + (lmbda / 2) * (ufl.ln(J)) ** 2
         return psi
 
-    def grad(self, x):
+    def grad(self, x=None):
         grad = super().grad(x)
 
         # Zero out gradient at boundary DOFs where density is fixed
         fem.set_bc(grad, self.gradient_dirichlet_bcs)
 
-        if self.params.r_min is not None:
+        if self.params.gradient_filter:
             # Create temporary function for gradient to access ghost values
             grad_func = fem.Function(self.V_e)
             grad_func.x.array[:] = grad
@@ -232,7 +256,9 @@ class NeoHookeanTopoOpt(NeoHookean):
 
             # Query neighbors within r_min for each owned DOF
             owned_coords = coord[:num_owned, :]
-            neighbors_list = tree.query_ball_point(owned_coords, self.params.r_min)
+            neighbors_list = tree.query_ball_point(
+                owned_coords, self.params.gradient_filter
+            )
 
             # Compute filtered gradient using sparse approach
             filtered_grad = copy.deepcopy(grad)
@@ -247,7 +273,7 @@ class NeoHookeanTopoOpt(NeoHookean):
                 distances = np.linalg.norm(neighbor_coords - owned_coords[p], axis=1)
 
                 # Compute weights
-                weights = self.params.r_min - distances
+                weights = self.params.gradient_filter - distances
 
                 # Get gradient and density values at neighbors
                 grads = grad_func.x.array[neighbor_indices]
