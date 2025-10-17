@@ -23,7 +23,9 @@ import pandas as pd
 class NeoHookean:
     def __init__(self, config_path, override_params=None):
         # Load parameters
-        params_updated = importlib.import_module(config_path.strip(".py")).params
+        params_updated = importlib.import_module(
+            config_path.replace("./", "").strip(".py").replace("/", ".")
+        ).params
         self.params = params.copy()
         self.params.update(params_updated)
         if override_params is not None:
@@ -593,6 +595,7 @@ class NeoHookean:
         if len(self._loss_history) > 1 and (
             0
             < (1 - self._loss_history[-1] / self._loss_history[-2])
+            * np.sign(self._loss_history[-1])
             < self.params.relative_tol
             or (
                 len(self._stage_loss_history) > 10

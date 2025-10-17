@@ -314,6 +314,7 @@ class NeoHookeanTopoOpt(NeoHookean):
         if len(self._loss_history) > 1 and (
             0
             < (1 - self._loss_history[-1] / self._loss_history[-2])
+            * np.sign(self._loss_history[-1])
             < self.params.relative_tol
             or (
                 len(self._stage_loss_history) > 10
