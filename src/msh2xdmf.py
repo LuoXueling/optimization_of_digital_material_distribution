@@ -30,16 +30,20 @@ def import_mesh(mesh_name, dim=2, directory=".", comm=None):
         comm: MPI communicator. Default: MPI.COMM_WORLD
 
     Returns:
-        tuple: (mesh, facet_tags, association_table)
+        tuple: (mesh, cell_tags, facet_tags, association_table)
             - mesh: dolfinx.mesh.Mesh object
+            - cell_tags: dolfinx.mesh.MeshTags for cell/volume regions
             - facet_tags: dolfinx.mesh.MeshTags for boundary facets
             - association_table: dict mapping physical group names to marker values
 
     Example:
-        >>> mesh, facet_tags, assoc_table = import_mesh("square", directory="mesh")
+        >>> mesh, cell_tags, facet_tags, assoc_table = import_mesh("square", directory="mesh")
         >>> # Use boundary markers
         >>> upper_id = assoc_table["upper"]
         >>> ds = ufl.Measure("ds", domain=mesh, subdomain_data=facet_tags)
+        >>> # Use domain markers
+        >>> main_id = assoc_table["main"]
+        >>> dx = ufl.Measure("dx", domain=mesh, subdomain_data=cell_tags)
     """
     if comm is None:
         comm = MPI.COMM_WORLD
@@ -90,4 +94,4 @@ def import_mesh(mesh_name, dim=2, directory=".", comm=None):
     # Broadcast association table to all ranks
     association_table = comm.bcast(association_table, root=0)
 
-    return mesh, facet_tags, association_table
+    return mesh, cell_tags, facet_tags, association_table

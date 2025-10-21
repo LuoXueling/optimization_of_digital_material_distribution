@@ -47,6 +47,13 @@ params.update(
         B=fem.Constant(
             _mesh, ScalarType((0.0, 0.0))
         ),  # Body force per unit volume # Modify for 3D
+        # Domain definitions (for subdomain integration)
+        # domain_dict: Define domains using geometric marker functions
+        #   Format: {lambda x: condition: "domain_name"}
+        #   Examples:
+        #     lambda x: x[0] < 0.5: "left_half"
+        #     lambda x: (x[0] - 0.5)**2 + (x[1] - 0.5)**2 < 0.25: "circle"
+        domain_dict=None,
         # Mark Dirichlet boundary subdomains and values
         # dirichlet_bcs_dict: Define Dirichlet BCs using geometric marker functions
         #   - Key: lambda function that marks boundary (e.g., lambda x: np.isclose(x[0], 0.0))

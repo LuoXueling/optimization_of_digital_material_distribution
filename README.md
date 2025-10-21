@@ -50,7 +50,7 @@ params = dotdict(
     nu=0.3,
 )
 
-mesh, boundaries, association_table = import_mesh("square", directory="mesh")
+mesh, cell_tags, boundaries, association_table = import_mesh("square", directory="mesh")
 
 params.update(
     dotdict(

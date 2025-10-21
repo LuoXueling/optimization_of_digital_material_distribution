@@ -14,7 +14,7 @@ from petsc4py import PETSc
 class NeoHookeanTopoOpt(NeoHookean):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._init_topo_opt(self)
+        self._init_topo_opt()
 
     def _init_topo_opt(self):
         # Defined optimized variable

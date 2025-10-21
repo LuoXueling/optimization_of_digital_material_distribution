@@ -101,6 +101,17 @@ class NeoHookean:
 
         self.load_boundary_conditions()
 
+        # Create domain meshtags for subdomain integration
+        self.domains = self._create_domain_meshtags()
+        self.domain_dx = ufl.dx(
+            metadata={"quadrature_degree": self.params.q_deg},
+            domain=self.mesh,
+            subdomain_data=self.domains,
+        )
+
+
+        self.log(f"Association table: {self.association_table}")
+
         # Initialize optimization related variables
         self._optimize_step = 0
         self._loss_history = []
@@ -240,8 +251,6 @@ class NeoHookean:
                     )
 
         self.dirichlet_bcs = self._define_dirichlet_boundaries()
-
-        self.log(f"Association table: {self.association_table}")
 
         self.boundary_ds = ufl.ds(
             metadata={"quadrature_degree": self.params.q_deg},
@@ -416,6 +425,129 @@ class NeoHookean:
                             dirichlet_bcs.append(bc)
         self.log(f"Found facets for Dirichlet BCs: {marker_facets_num}")
         return dirichlet_bcs
+
+    def _create_domain_meshtags(self):
+        """Create cell-based MeshTags for domain integration.
+
+        Processes domain_dict to mark cells based on lambda functions and merges
+        with GMSH-imported cell tags if available.
+
+        Returns:
+            dolfinx.mesh.MeshTags: Cell-based meshtags for domains
+        """
+        # Ensure topology connectivity is created
+        self.mesh.topology.create_connectivity(
+            self.mesh.topology.dim, self.mesh.topology.dim
+        )
+
+        # Start with GMSH-imported cell tags if available
+        if self.params.cell_tags is not None:
+            # Extract existing cell tags from GMSH
+            existing_indices = self.params.cell_tags.indices
+            existing_values = self.params.cell_tags.values
+        else:
+            # Create empty arrays
+            existing_indices = np.array([], dtype=np.int32)
+            existing_values = np.array([], dtype=np.int32)
+
+        # Process domain_dict for geometrically-defined domains
+        if self.params.domain_dict is not None:
+            for i, (marker_func, domain_name) in enumerate(
+                self.params.domain_dict.items()
+            ):
+                # Determine marker ID
+                marker_key = (
+                    f"Config Domain {i}" if domain_name is None else domain_name
+                )
+
+                if marker_key in self.association_table.keys():
+                    marker_id = self.association_table[marker_key]
+                else:
+                    # Find a unique marker ID
+                    marker_id = 1
+                    while marker_id in self.association_table.values():
+                        marker_id += 1
+
+                    # Store in association table
+                    self.association_table[marker_key] = marker_id
+
+                # Locate cells matching the marker function
+                cells = dmesh.locate_entities(
+                    self.mesh, self.mesh.topology.dim, marker_func
+                )
+
+                if len(cells) > 0:
+                    # Add to existing arrays
+                    values = np.full(len(cells), marker_id, dtype=np.int32)
+                    existing_indices = np.concatenate([existing_indices, cells])
+                    existing_values = np.concatenate([existing_values, values])
+
+                    # Log the number of cells marked
+                    num_cells_global = self.mesh.comm.allreduce(len(cells), op=MPI.SUM)
+                    self.log(
+                        f"Marked {num_cells_global} cells for domain '{marker_key}' with ID {marker_id}"
+                    )
+
+        # Find all cells that are not marked
+        num_cells_local = self.mesh.topology.index_map(
+            self.mesh.topology.dim
+        ).size_local
+        all_cells = np.arange(num_cells_local, dtype=np.int32)
+
+        # Get set of marked cells
+        marked_cells = set(existing_indices) if len(existing_indices) > 0 else set()
+
+        # Find unmarked cells
+        unmarked_cells = np.array(
+            [cell for cell in all_cells if cell not in marked_cells], dtype=np.int32
+        )
+
+        if len(unmarked_cells) > 0:
+            # Assign a marker ID for unmarked cells
+            unmarked_marker_key = "unmarked_cells"
+
+            if unmarked_marker_key in self.association_table.keys():
+                unmarked_marker_id = self.association_table[unmarked_marker_key]
+            else:
+                # Find a unique marker ID
+                unmarked_marker_id = 1  # Default to 0 for unmarked cells
+                while unmarked_marker_id in self.association_table.values():
+                    unmarked_marker_id += 1
+
+                # Store in association table
+                self.association_table[unmarked_marker_key] = unmarked_marker_id
+
+            # Add unmarked cells to the arrays
+            unmarked_values = np.full(
+                len(unmarked_cells), unmarked_marker_id, dtype=np.int32
+            )
+            existing_indices = np.concatenate([existing_indices, unmarked_cells])
+            existing_values = np.concatenate([existing_values, unmarked_values])
+
+            # Log the number of unmarked cells
+            num_unmarked_global = self.mesh.comm.allreduce(
+                len(unmarked_cells), op=MPI.SUM
+            )
+            self.log(
+                f"Marked {num_unmarked_global} unmarked cells with ID {unmarked_marker_id}"
+            )
+
+        # Create MeshTags with all collected cells
+        if len(existing_indices) > 0:
+            domains = dmesh.meshtags(
+                self.mesh, self.mesh.topology.dim, existing_indices, existing_values
+            )
+        else:
+            # Create empty MeshTags
+            domains = dmesh.meshtags(
+                self.mesh,
+                self.mesh.topology.dim,
+                np.array([], dtype=np.int32),
+                np.array([], dtype=np.int32),
+            )
+
+        self.log(f"Created domain MeshTags with {len(existing_indices)} cells")
+        return domains
 
     def forward(self):
         psi = self._strain_energy_density()
@@ -734,12 +866,27 @@ class NeoHookean:
         rank_field = fem.Function(scalar_space, name="mpi_rank")
         rank_field.x.array[:] = self.mesh.comm.rank
 
+        # Add domain markers for visualization
+        domain_markers = fem.Function(scalar_space, name="domain_markers")
+        num_cells_local = self.mesh.topology.index_map(
+            self.mesh.topology.dim
+        ).size_local
+        domain_markers.x.array[:num_cells_local] = 0  # Initialize to 0
+
+        # Map domain tags to cell values
+        if len(self.domains.indices) > 0:
+            # Create a mapping from cell index to marker value
+            for cell_idx, marker_val in zip(self.domains.indices, self.domains.values):
+                if cell_idx < num_cells_local:  # Only set locally owned cells
+                    domain_markers.x.array[cell_idx] = marker_val
+
         cell_data = {
             "strain": e,
             "PK2_stress": pk2,
             "Cauchy_stress": sigma,
             "strain_energy_density": psi,
             "mpi_rank": rank_field,
+            "domain_markers": domain_markers,
         }
 
         if self.optimized:
