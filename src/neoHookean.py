@@ -196,13 +196,16 @@ class NeoHookean:
 
         # Process all geometrically-defined BCs uniformly
         for marker_func, val, bc_type, i in bc_list:
-            # Find a unique marker ID
-            marker_id = 1
-            while marker_id in self.association_table.values():
-                marker_id += 1
+            if f"Config {bc_type} BC {i}" in self.association_table.keys():
+                marker_id = self.association_table[f"Config {bc_type} BC {i}"]
+            else:
+                # Find a unique marker ID
+                marker_id = 1
+                while marker_id in self.association_table.values():
+                    marker_id += 1
 
-            # Store in association table
-            self.association_table[f"Config {bc_type} BC {i}"] = marker_id
+                # Store in association table
+                self.association_table[f"Config {bc_type} BC {i}"] = marker_id
 
             # Locate boundary facets
             facets = dmesh.locate_entities_boundary(

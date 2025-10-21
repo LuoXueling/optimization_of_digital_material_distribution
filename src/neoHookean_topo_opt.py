@@ -8,12 +8,15 @@ import copy
 import os
 from src.utils import project
 from scipy.spatial import cKDTree
+from petsc4py import PETSc
 
 
 class NeoHookeanTopoOpt(NeoHookean):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._init_topo_opt(self)
 
+    def _init_topo_opt(self):
         # Defined optimized variable
         self.filtered_gradient = fem.Function(self.V_e, name="Filtered gradient")
 

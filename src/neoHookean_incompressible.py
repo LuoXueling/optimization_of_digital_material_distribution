@@ -107,20 +107,7 @@ class NeoHookeanIncompressible(NeoHookean):
 class NeoHookeanIncompressibleTopoOpt(NeoHookeanTopoOpt, NeoHookeanIncompressible):
     def __init__(self, *args, **kwargs):
         NeoHookeanIncompressible.__init__(self, *args, **kwargs)
-
-        # Defined optimized variable
-        self.filtered_gradient = fem.Function(self.V_e, name="Filtered gradient")
-
-        # Initialize optimization related variables
-        self._initial_strain_energy_density = None
-        self._initial_weight_constraint = None
-        self.penalty = self.params.init_penalty
-
-        warnings.warn(
-            "NeoHookeanIncompressibleTopoOpt becomes unstable as penalty increases and density decreases, unless another strain energy density is used.",
-            UserWarning,
-            stacklevel=2,
-        )
+        NeoHookeanTopoOpt._init_topo_opt(self)
 
     def _strain_energy_density(self, F=None, C=None, Eps=None):
         to_3d = lambda x: (
