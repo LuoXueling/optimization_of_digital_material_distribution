@@ -25,7 +25,7 @@ def solve_nonlinear_problem(
     logger=print,
     use_linesearch=True,
     max_linesearch_it=10,
-    alpha_min=1e-4,
+    alpha_min=1e-1,
     c1=1e-4,
 ):
     """
@@ -130,10 +130,39 @@ def solve_nonlinear_problem(
         # Compute residual norm
         residual_norm = L.norm()
 
+        # Check for NaN in residual norm
+        if np.isnan(residual_norm) or np.isinf(residual_norm):
+            logger(f"  ERROR: Residual norm is {residual_norm} at iteration {i}")
+            logger(f"  This indicates numerical instability (likely due to severe mesh distortion)")
+
+            if use_linesearch and i > 0:
+                logger(f"  Strategy: Line search should prevent this, but it occurred anyway")
+                logger(f"  Suggestion: Try reducing loading, using smaller time steps, or improving mesh quality")
+            else:
+                logger(f"  Strategy: Enable line search (use_linesearch=True) to prevent this issue")
+
+            # Cleanup before raising exception
+            ksp.destroy()
+            A.destroy()
+            L.destroy()
+            if use_linesearch:
+                L_trial.destroy()
+            raise Exception(f"Newton solver encountered NaN/Inf residual at iteration {i}")
+
         if i == 0:
             residual_norm0 = residual_norm
             if residual_norm0 == 0:
                 residual_norm0 = 1.0  # Avoid division by zero
+            # Check for NaN in initial residual
+            if np.isnan(residual_norm0) or np.isinf(residual_norm0):
+                logger(f"  ERROR: Initial residual is {residual_norm0}")
+                logger(f"  This indicates a problem with initial conditions or boundary conditions")
+                ksp.destroy()
+                A.destroy()
+                L.destroy()
+                if use_linesearch:
+                    L_trial.destroy()
+                raise Exception("Newton solver encountered NaN/Inf in initial residual")
 
         # Compute relative residual
         residual_rel = residual_norm / residual_norm0 if residual_norm0 > 0 else 0.0
@@ -157,6 +186,20 @@ def solve_nonlinear_problem(
         # Solve linear system: A * du = -F, which is A * du = L (since L was set to -F)
         ksp.solve(L, dx.x.petsc_vec)
         dx.x.scatter_forward()
+
+        # Check for NaN/Inf in Newton direction
+        dx_norm = dx.x.petsc_vec.norm()
+        if np.isnan(dx_norm) or np.isinf(dx_norm):
+            logger(f"  ERROR: Newton direction has NaN/Inf values (norm = {dx_norm})")
+            logger(f"  This indicates the Jacobian is singular or ill-conditioned")
+            logger(f"  Suggestion: Check boundary conditions, material parameters, or use a different linear solver")
+            # Cleanup before raising exception
+            ksp.destroy()
+            A.destroy()
+            L.destroy()
+            if use_linesearch:
+                L_trial.destroy()
+            raise Exception(f"Newton solver encountered NaN/Inf in Newton direction at iteration {i}")
 
         # Backtracking line search
         if use_linesearch:
@@ -194,6 +237,16 @@ def solve_nonlinear_problem(
                 u.x.array[:] = u_backup
                 u.x.scatter_forward()
 
+                # Check for NaN/Inf in trial residual
+                if np.isnan(residual_norm_trial) or np.isinf(residual_norm_trial):
+                    logger(
+                        f"    Line search: alpha = {alpha:.4e} produced NaN/Inf residual, backtracking..."
+                    )
+                    # This trial point is invalid, continue backtracking
+                    alpha *= 0.5
+                    ls_iter += 1
+                    continue
+
                 # Check Armijo condition: ||F(u + alpha*p)|| <= (1 - c1*alpha) * ||F(u)||
                 # For Newton, this ensures sufficient decrease in residual
                 if (
@@ -212,8 +265,34 @@ def solve_nonlinear_problem(
 
             if not accepted:
                 logger(
-                    f"    Line search failed to find acceptable step size, using alpha = {alpha:.4e}"
+                    f"    WARNING: Line search failed after {max_linesearch_it} iterations"
                 )
+                logger(
+                    f"    Last attempted alpha = {alpha:.4e}"
+                )
+                # Check if the last trial had NaN
+                if np.isnan(residual_norm_trial) or np.isinf(residual_norm_trial):
+                    logger(
+                        f"    ERROR: All line search attempts produced NaN/Inf residuals"
+                    )
+                    logger(
+                        f"    This indicates severe numerical instability"
+                    )
+                    logger(
+                        f"    Suggestion: Reduce loading magnitude, use smaller increments, or check material parameters"
+                    )
+                    # Cleanup before raising exception
+                    ksp.destroy()
+                    A.destroy()
+                    L.destroy()
+                    L_trial.destroy()
+                    raise Exception(
+                        f"Newton solver: line search failed with all NaN/Inf residuals at iteration {i}"
+                    )
+                else:
+                    logger(
+                        f"    Accepting last step with residual = {residual_norm_trial:.5e}"
+                    )
 
             # Update solution with accepted step
             u.x.array[:] = u_trial.x.array[:]
@@ -223,6 +302,18 @@ def solve_nonlinear_problem(
             # Update solution: u = u - dx (Newton correction)
             u.x.petsc_vec.axpy(-1.0, dx.x.petsc_vec)
             u.x.scatter_forward()
+
+        # Check for NaN/Inf in updated solution
+        if np.any(np.isnan(u.x.array)) or np.any(np.isinf(u.x.array)):
+            logger(f"  ERROR: Solution contains NaN/Inf values after update")
+            logger(f"  This should have been caught by line search if enabled")
+            # Cleanup before raising exception
+            ksp.destroy()
+            A.destroy()
+            L.destroy()
+            if use_linesearch:
+                L_trial.destroy()
+            raise Exception(f"Newton solver: solution contains NaN/Inf after iteration {i}")
 
         i += 1
 
