@@ -117,9 +117,10 @@ params = dotdict(
     max_penalty=4.0,
     gradient_filter=0.12,
     fix_density_layers=2,
+    clip_gradient=0.2,
     output_per_step=1,
     maxiter=10000,
-    lr=1,
+    lr=5,
     # Solver settings
     relative_tol=0.001,
     # Elasticity parameters
@@ -141,13 +142,20 @@ params.update(
     dotdict(
         mesh=_mesh,
         # Body force
-        B=fem.Constant(_mesh, ScalarType((0.0, 0.0))),  # Body force per unit volume # Modify for 3D
+        B=fem.Constant(
+            _mesh, ScalarType((0.0, 0.0))
+        ),  # Body force per unit volume # Modify for 3D
         # Mark Dirichlet boundary subdomains and values
         dirichlet_bcs_dict={
-            lambda x: np.isclose(x[0], 0.0): fem.Constant(_mesh, ScalarType((0.0, 0.0))),  # Modify for 3D
+            lambda x: np.isclose(x[0], 0.0): fem.Constant(
+                _mesh, ScalarType((0.0, 0.0))
+            ),  # Modify for 3D
         },
         neumann_bcs_dict={
-            lambda x: np.isclose(x[0], params.width) & np.isclose(x[1], 0, atol=params.mesh_size * 1.1): fem.Constant(_mesh, ScalarType((0.0, -0.0001))),  # Modify for 3D
+            lambda x: np.isclose(x[0], params.width)
+            & np.isclose(x[1], 0, atol=params.mesh_size * 1.1): fem.Constant(
+                _mesh, ScalarType((0.0, -0.001))
+            ),  # Modify for 3D
         },
     )
 )
