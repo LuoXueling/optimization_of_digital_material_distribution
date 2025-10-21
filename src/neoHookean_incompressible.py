@@ -60,7 +60,12 @@ class NeoHookeanIncompressible(NeoHookean):
 
         # Solve variational problem
         solve_nonlinear_problem(
-            F, self.w, bcs=self.dirichlet_bcs, J=J, comm=self.mesh.comm
+            F,
+            self.w,
+            bcs=self.dirichlet_bcs,
+            J=J,
+            comm=self.mesh.comm,
+            logger=self.log,
         )
 
     def _strain_energy_density(self, F=None, C=None, Eps=None):
@@ -166,7 +171,12 @@ class NeoHookeanIncompressibleStaggered(NeoHookeanIncompressible):
 
             # Solve nonlinear problem
             solve_nonlinear_problem(
-                F_u, self.u, bcs=self.dirichlet_bcs, J=J_u, comm=self.mesh.comm
+                F_u,
+                self.u,
+                bcs=self.dirichlet_bcs,
+                J=J_u,
+                comm=self.mesh.comm,
+                logger=self.log,
             )
 
             # Project (J-1) into V_p then we have the increment of p

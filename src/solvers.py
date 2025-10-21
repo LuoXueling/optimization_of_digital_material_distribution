@@ -6,6 +6,10 @@ from mpi4py import MPI
 from dolfinx.fem.petsc import NonlinearProblem
 from dolfinx.nls.petsc import NewtonSolver
 import dolfinx.fem as fem
+import dolfinx.fem.petsc
+from petsc4py import PETSc
+import numpy as np
+import ufl
 
 
 def solve_nonlinear_problem(
@@ -14,36 +18,33 @@ def solve_nonlinear_problem(
     bcs=None,
     J=None,
     rtol=1e-9,
+    atol=1e-10,
     max_it=50,
     linear_solver="mumps",
-    convergence_criterion="residual",
     comm=None,
-    log_file_path=None,
+    logger=print,
 ):
     """
-    Solve a nonlinear variational problem using Newton's method.
+    Custom Newton solver for nonlinear problems.
 
-    This is a helper function to simplify the common pattern of setting up
-    and solving nonlinear problems in DOLFINx.
+    This implements Newton's method directly using PETSc matrices and vectors,
+    giving more control over the iteration process.
 
     Arguments:
         F: The residual form (UFL form)
         u: The solution function (fem.Function)
         bcs: List of Dirichlet boundary conditions (optional)
         J: The Jacobian form (optional, will be computed automatically if not provided)
-        rtol: Relative tolerance for convergence (default: 1e-6)
+        rtol: Relative tolerance for convergence (default: 1e-9)
+        atol: Absolute tolerance for convergence (default: 1e-10)
         max_it: Maximum number of Newton iterations (default: 50)
         linear_solver: Linear solver type ("mumps", "superlu_dist", etc.) (default: "mumps")
-        convergence_criterion: Convergence criterion ("incremental" or "residual") (default: "residual")
         comm: MPI communicator (default: MPI.COMM_WORLD)
+        logger: A callable used for logging
 
     Returns:
         tuple: (num_iterations, converged) where num_iterations is the number of iterations
                and converged is a boolean indicating if the solver converged
-
-    Example:
-        >>> F = ufl.derivative(Pi, u, v)
-        >>> num_its, converged = solve_nonlinear_problem(F, u, bcs=bcs)
     """
     if comm is None:
         comm = MPI.COMM_WORLD
@@ -51,34 +52,22 @@ def solve_nonlinear_problem(
     if bcs is None:
         bcs = []
 
-    # Create the nonlinear problem
-    problem = NonlinearProblem(F, u, bcs=bcs, J=J)
+    # Compute Jacobian if not provided
+    if J is None:
+        J = ufl.derivative(F, u)
 
-    # Create Newton solver
-    solver = NewtonSolver(comm, problem)
+    # Create forms
+    residual_form = fem.form(F)
+    jacobian_form = fem.form(J)
 
-    # Configure solver
-    solver.convergence_criterion = convergence_criterion
-    solver.rtol = rtol
-    solver.max_it = max_it
+    # Create matrix and vectors
+    A = dolfinx.fem.petsc.create_matrix(jacobian_form)
+    L = dolfinx.fem.petsc.create_vector(residual_form)
+    dx = fem.Function(u.function_space)
 
-    # Set up logging
-    from dolfinx import log as dlog
-    from src.utils import redirect_stdout_to_log, restore_stdout_from_log
-
-    # Temporarily set log level to INFO to capture Newton iterations
-    original_log_level = dlog.get_log_level()
-    dlog.set_log_level(dlog.LogLevel.INFO)
-
-    # Redirect stdout to both terminal and log file
-    old_stdout_fd = None
-    log_file_info = None
-
-    if log_file_path and comm.rank == 0:
-        old_stdout_fd, log_file_info = redirect_stdout_to_log(log_file_path)
-
-    # Configure linear solver
-    ksp = solver.krylov_solver
+    # Create linear solver
+    ksp = PETSc.KSP().create(comm)
+    ksp.setOperators(A)
 
     if linear_solver == "mumps":
         ksp.setType("preonly")
@@ -95,20 +84,86 @@ def solve_nonlinear_problem(
         ksp.setType("cg")
         ksp.getPC().setType("ilu")
     else:
-        # Custom solver - just set the type
         ksp.setType(linear_solver)
 
-    # Solve
-    num_its, converged = solver.solve(u)
+    # Newton iterations
+    i = 0
+    converged = False
+    residual_norm0 = None
 
-    # Restore stdout
-    if log_file_info:
-        restore_stdout_from_log(old_stdout_fd, log_file_info)
+    logger(f"Starting custom Newton solver")
 
-    # Restore original log level
-    dlog.set_log_level(original_log_level)
+    while i < max_it:
+        # Assemble Jacobian and residual
+        with L.localForm() as loc_L:
+            loc_L.set(0)
+        A.zeroEntries()
 
-    return num_its, converged
+        dolfinx.fem.petsc.assemble_matrix(A, jacobian_form, bcs=bcs)
+        A.assemble()
+
+        dolfinx.fem.petsc.assemble_vector(L, residual_form)
+
+        # Apply lifting for boundary conditions
+        dolfinx.fem.petsc.apply_lifting(
+            L, [jacobian_form], bcs=[bcs], x0=[u.x.petsc_vec], alpha=-1.0
+        )
+        L.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+
+        # Set BC values in residual
+        fem.petsc.set_bc(L, bcs, u.x.petsc_vec, -1.0)
+
+        # Compute residual norm
+        residual_norm = L.norm()
+
+        if i == 0:
+            residual_norm0 = residual_norm
+            if residual_norm0 == 0:
+                residual_norm0 = 1.0  # Avoid division by zero
+
+        # Compute relative residual
+        residual_rel = residual_norm / residual_norm0 if residual_norm0 > 0 else 0.0
+
+        # Log iteration info
+        logger(
+            f"  Iteration {i}: residual abs norm = {residual_norm:.5e} ({atol}) rel norm = {residual_rel:.5e} ({rtol})"
+        )
+
+        # Check convergence
+        if residual_norm < atol:
+            converged = True
+            logger(f"  Converged (absolute tolerance)")
+            break
+
+        if residual_rel < rtol:
+            converged = True
+            logger(f"  Converged (relative tolerance)")
+            break
+
+        # Solve linear system: A * du = -F, which is A * du = L (since L was set to -F)
+        ksp.solve(L, dx.x.petsc_vec)
+        dx.x.scatter_forward()
+
+        # Update solution: u_new = u_old + du
+        # But the Newton solver computes the UPDATE to the solution that minimizes residual
+        # So we need: u = u - du (Newton correction)
+        u.x.petsc_vec.axpy(-1.0, dx.x.petsc_vec)
+        u.x.scatter_forward()
+
+        i += 1
+
+    # Cleanup
+    ksp.destroy()
+    A.destroy()
+    L.destroy()
+
+    if not converged:
+        logger(f"  Newton solver did not converge after {i} iterations")
+        raise Exception(f"Newton solver did not converge after {i} iterations")
+    else:
+        logger(f"  Newton solver converged in {i} iterations")
+
+    return i, converged
 
 
 def solve_linear_problem(a, L, u, bcs=None, linear_solver="mumps", comm=None):

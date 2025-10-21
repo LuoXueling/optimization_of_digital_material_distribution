@@ -568,7 +568,7 @@ class NeoHookean:
             bcs=self.dirichlet_bcs,
             J=J,
             comm=self.mesh.comm,
-            log_file_path=os.path.join(self.path, "log.txt"),
+            logger=self.log,
         )
 
     def _objective_function(self):
