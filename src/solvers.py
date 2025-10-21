@@ -23,12 +23,17 @@ def solve_nonlinear_problem(
     linear_solver="mumps",
     comm=None,
     logger=print,
+    use_linesearch=True,
+    max_linesearch_it=10,
+    alpha_min=1e-4,
+    c1=1e-4,
 ):
     """
-    Custom Newton solver for nonlinear problems.
+    Custom Newton solver for nonlinear problems with backtracking line search.
 
     This implements Newton's method directly using PETSc matrices and vectors,
-    giving more control over the iteration process.
+    giving more control over the iteration process. Includes optional backtracking
+    line search to ensure residual reduction.
 
     Arguments:
         F: The residual form (UFL form)
@@ -41,6 +46,10 @@ def solve_nonlinear_problem(
         linear_solver: Linear solver type ("mumps", "superlu_dist", etc.) (default: "mumps")
         comm: MPI communicator (default: MPI.COMM_WORLD)
         logger: A callable used for logging
+        use_linesearch: Enable backtracking line search (default: True)
+        max_linesearch_it: Maximum line search iterations (default: 10)
+        alpha_min: Minimum step size for line search (default: 1e-4)
+        c1: Armijo condition parameter (default: 1e-4)
 
     Returns:
         tuple: (num_iterations, converged) where num_iterations is the number of iterations
@@ -64,6 +73,11 @@ def solve_nonlinear_problem(
     A = dolfinx.fem.petsc.create_matrix(jacobian_form)
     L = dolfinx.fem.petsc.create_vector(residual_form)
     dx = fem.Function(u.function_space)
+
+    # For line search: store trial solution and residual
+    if use_linesearch:
+        u_trial = fem.Function(u.function_space)
+        L_trial = dolfinx.fem.petsc.create_vector(residual_form)
 
     # Create linear solver
     ksp = PETSc.KSP().create(comm)
@@ -144,11 +158,71 @@ def solve_nonlinear_problem(
         ksp.solve(L, dx.x.petsc_vec)
         dx.x.scatter_forward()
 
-        # Update solution: u_new = u_old + du
-        # But the Newton solver computes the UPDATE to the solution that minimizes residual
-        # So we need: u = u - du (Newton correction)
-        u.x.petsc_vec.axpy(-1.0, dx.x.petsc_vec)
-        u.x.scatter_forward()
+        # Backtracking line search
+        if use_linesearch:
+            alpha = 1.0  # Start with full Newton step
+            ls_iter = 0
+            accepted = False
+
+            while ls_iter < max_linesearch_it and not accepted:
+                # Compute trial solution: u_trial = u - alpha * dx
+                u_trial.x.array[:] = u.x.array[:]
+                u_trial.x.petsc_vec.axpy(-alpha, dx.x.petsc_vec)
+                u_trial.x.scatter_forward()
+
+                # Temporarily update u to evaluate residual at trial point
+                u_backup = u.x.array.copy()
+                u.x.array[:] = u_trial.x.array[:]
+                u.x.scatter_forward()
+
+                # Assemble residual at trial point
+                with L_trial.localForm() as loc_L:
+                    loc_L.set(0)
+                dolfinx.fem.petsc.assemble_vector(L_trial, residual_form)
+                dolfinx.fem.petsc.apply_lifting(
+                    L_trial, [jacobian_form], bcs=[bcs], x0=[u.x.petsc_vec], alpha=-1.0
+                )
+                L_trial.ghostUpdate(
+                    addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE
+                )
+                fem.petsc.set_bc(L_trial, bcs, u.x.petsc_vec, -1.0)
+
+                # Compute trial residual norm
+                residual_norm_trial = L_trial.norm()
+
+                # Restore u to original value
+                u.x.array[:] = u_backup
+                u.x.scatter_forward()
+
+                # Check Armijo condition: ||F(u + alpha*p)|| <= (1 - c1*alpha) * ||F(u)||
+                # For Newton, this ensures sufficient decrease in residual
+                if (
+                    residual_norm_trial <= (1.0 - c1 * alpha) * residual_norm
+                    or alpha < alpha_min
+                ):
+                    accepted = True
+                    if ls_iter > 0:
+                        logger(
+                            f"    Line search: alpha = {alpha:.4e}, residual = {residual_norm_trial:.5e} (after {ls_iter + 1} iterations)"
+                        )
+                else:
+                    # Backtrack: reduce step size
+                    alpha *= 0.5
+                    ls_iter += 1
+
+            if not accepted:
+                logger(
+                    f"    Line search failed to find acceptable step size, using alpha = {alpha:.4e}"
+                )
+
+            # Update solution with accepted step
+            u.x.array[:] = u_trial.x.array[:]
+            u.x.scatter_forward()
+        else:
+            # No line search: use full Newton step
+            # Update solution: u = u - dx (Newton correction)
+            u.x.petsc_vec.axpy(-1.0, dx.x.petsc_vec)
+            u.x.scatter_forward()
 
         i += 1
 
@@ -156,6 +230,8 @@ def solve_nonlinear_problem(
     ksp.destroy()
     A.destroy()
     L.destroy()
+    if use_linesearch:
+        L_trial.destroy()
 
     if not converged:
         logger(f"  Newton solver did not converge after {i} iterations")
