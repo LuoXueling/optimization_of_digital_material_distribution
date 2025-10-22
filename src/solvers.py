@@ -10,6 +10,7 @@ import dolfinx.fem.petsc
 from petsc4py import PETSc
 import numpy as np
 import ufl
+import functools
 
 
 def solve_nonlinear_problem(
@@ -17,39 +18,40 @@ def solve_nonlinear_problem(
     u,
     bcs=None,
     J=None,
-    rtol=1e-9,
-    atol=1e-10,
+    rtol=1e-6,
+    atol=1e-6,
     max_it=50,
     linear_solver="mumps",
     comm=None,
     logger=print,
-    use_linesearch=True,
-    max_linesearch_it=10,
-    alpha_min=1e-1,
-    c1=1e-4,
+    snes_type="newtonls",
+    linesearch_type="bt",
+    snes_options=None,
 ):
     """
-    Custom Newton solver for nonlinear problems with backtracking line search.
+    Solve nonlinear problem using PETSc SNES (Scalable Nonlinear Equations Solvers).
 
-    This implements Newton's method directly using PETSc matrices and vectors,
-    giving more control over the iteration process. Includes optional backtracking
-    line search to ensure residual reduction.
+    This is a backport of DOLFINx 0.10.0's approach to using SNES directly with DOLFINx 0.9.0.
 
     Arguments:
         F: The residual form (UFL form)
         u: The solution function (fem.Function)
         bcs: List of Dirichlet boundary conditions (optional)
         J: The Jacobian form (optional, will be computed automatically if not provided)
-        rtol: Relative tolerance for convergence (default: 1e-9)
-        atol: Absolute tolerance for convergence (default: 1e-10)
-        max_it: Maximum number of Newton iterations (default: 50)
-        linear_solver: Linear solver type ("mumps", "superlu_dist", etc.) (default: "mumps")
+        rtol: Relative tolerance for convergence (default: 1e-6)
+        atol: Absolute tolerance for convergence (default: 1e-6)
+        max_it: Maximum number of iterations (default: 50)
+        linear_solver: Linear solver type ("mumps", "superlu_dist", "gmres", "cg") (default: "mumps")
         comm: MPI communicator (default: MPI.COMM_WORLD)
         logger: A callable used for logging
-        use_linesearch: Enable backtracking line search (default: True)
-        max_linesearch_it: Maximum line search iterations (default: 10)
-        alpha_min: Minimum step size for line search (default: 1e-4)
-        c1: Armijo condition parameter (default: 1e-4)
+        snes_type: SNES solver type (default: "newtonls")
+            Options: "newtonls", "newtontr" (trust region), "nrichardson", "ngmres",
+                    "qn" (quasi-Newton), "ngs", "ncg", "fas", "ms", "nasm", "anderson",
+                    "aspin", "composite"
+        linesearch_type: Line search algorithm (default: "bt")
+            Options: "bt" (backtracking), "l2" (L2-norm), "cp" (critical point),
+                    "basic", "nleqerr"
+        snes_options: Additional PETSc SNES options as dict (optional)
 
     Returns:
         tuple: (num_iterations, converged) where num_iterations is the number of iterations
@@ -71,18 +73,84 @@ def solve_nonlinear_problem(
 
     # Create matrix and vectors
     A = dolfinx.fem.petsc.create_matrix(jacobian_form)
-    L = dolfinx.fem.petsc.create_vector(residual_form)
-    dx = fem.Function(u.function_space)
+    b = dolfinx.fem.petsc.create_vector(residual_form)
 
-    # For line search: store trial solution and residual
-    if use_linesearch:
-        u_trial = fem.Function(u.function_space)
-        L_trial = dolfinx.fem.petsc.create_vector(residual_form)
+    # Callback for residual assembly (compatible with SNES.setFunction)
+    def assemble_residual_callback(snes_solver, x, F_vec):
+        """Assemble residual vector for SNES"""
+        # Update ghost values in input vector
+        x.ghostUpdate(addv=PETSc.InsertMode.INSERT, mode=PETSc.ScatterMode.FORWARD)
 
-    # Create linear solver
-    ksp = PETSc.KSP().create(comm)
-    ksp.setOperators(A)
+        # Copy solution from SNES into function
+        x.copy(u.x.petsc_vec)
+        u.x.scatter_forward()
 
+        # Zero residual vector
+        with F_vec.localForm() as F_local:
+            F_local.set(0.0)
+
+        # Assemble residual
+        dolfinx.fem.petsc.assemble_vector(F_vec, residual_form)
+        dolfinx.fem.petsc.apply_lifting(
+            F_vec, [jacobian_form], bcs=[bcs], x0=[x], alpha=-1.0
+        )
+        F_vec.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+        fem.petsc.set_bc(F_vec, bcs, x, -1.0)
+
+        # Final ghost update to ensure consistency across processes
+        F_vec.ghostUpdate(addv=PETSc.InsertMode.INSERT, mode=PETSc.ScatterMode.FORWARD)
+
+    # Callback for Jacobian assembly (compatible with SNES.setJacobian)
+    def assemble_jacobian_callback(snes_solver, x, J_mat, P_mat):
+        """Assemble Jacobian matrix for SNES"""
+        # Update ghost values in input vector
+        x.ghostUpdate(addv=PETSc.InsertMode.INSERT, mode=PETSc.ScatterMode.FORWARD)
+
+        # Copy solution from SNES into function
+        x.copy(u.x.petsc_vec)
+        u.x.scatter_forward()
+
+        # Zero and assemble Jacobian
+        J_mat.zeroEntries()
+        dolfinx.fem.petsc.assemble_matrix(J_mat, jacobian_form, bcs=bcs)
+        J_mat.assemble()
+
+        return PETSc.Mat.Structure.SAME_NONZERO_PATTERN
+
+    # Monitoring callback for logging
+    iteration_data = {"count": 0, "residual_norm0": None}
+
+    def monitor_callback(snes_solver, iteration, residual_norm):
+        """Monitor callback for logging iteration progress"""
+        if iteration == 0:
+            iteration_data["residual_norm0"] = (
+                residual_norm if residual_norm > 0 else 1.0
+            )
+
+        residual_rel = residual_norm / iteration_data["residual_norm0"]
+        logger(
+            f"  Iteration {iteration}: residual abs norm = {residual_norm:.5e} ({atol}) "
+            f"rel norm = {residual_rel:.5e} ({rtol})"
+        )
+        iteration_data["count"] = iteration
+
+    # Create SNES solver
+    snes = PETSc.SNES().create(comm)
+    snes.setType(snes_type)
+
+    # Set residual and Jacobian callbacks
+    snes.setFunction(assemble_residual_callback, b)
+    snes.setJacobian(assemble_jacobian_callback, A, A)
+
+    # Configure line search
+    if linesearch_type:
+        snes.getLineSearch().setType(linesearch_type)
+
+    # Set tolerances
+    snes.setTolerances(rtol=rtol, atol=atol, max_it=max_it)
+
+    # Configure linear solver (KSP)
+    ksp = snes.getKSP()
     if linear_solver == "mumps":
         ksp.setType("preonly")
         ksp.getPC().setType("lu")
@@ -100,237 +168,56 @@ def solve_nonlinear_problem(
     else:
         ksp.setType(linear_solver)
 
-    # Newton iterations
-    i = 0
-    converged = False
-    residual_norm0 = None
+    # Apply custom SNES options if provided
+    if snes_options:
+        opts = PETSc.Options()
+        for key, value in snes_options.items():
+            opts[key] = value
+        snes.setFromOptions()
 
-    logger(f"Starting custom Newton solver")
+    # Set monitoring callback
+    snes.setMonitor(monitor_callback)
 
-    while i < max_it:
-        # Assemble Jacobian and residual
-        with L.localForm() as loc_L:
-            loc_L.set(0)
-        A.zeroEntries()
+    # Log start
+    logger(
+        f"Starting PETSc SNES solver (type: {snes_type}, line search: {linesearch_type})"
+    )
 
-        dolfinx.fem.petsc.assemble_matrix(A, jacobian_form, bcs=bcs)
-        A.assemble()
+    # Solve
+    snes.solve(None, u.x.petsc_vec)
+    u.x.scatter_forward()
 
-        dolfinx.fem.petsc.assemble_vector(L, residual_form)
-
-        # Apply lifting for boundary conditions
-        dolfinx.fem.petsc.apply_lifting(
-            L, [jacobian_form], bcs=[bcs], x0=[u.x.petsc_vec], alpha=-1.0
-        )
-        L.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
-
-        # Set BC values in residual
-        fem.petsc.set_bc(L, bcs, u.x.petsc_vec, -1.0)
-
-        # Compute residual norm
-        residual_norm = L.norm()
-
-        # Check for NaN in residual norm
-        if np.isnan(residual_norm) or np.isinf(residual_norm):
-            logger(f"  ERROR: Residual norm is {residual_norm} at iteration {i}")
-            logger(f"  This indicates numerical instability (likely due to severe mesh distortion)")
-
-            if use_linesearch and i > 0:
-                logger(f"  Strategy: Line search should prevent this, but it occurred anyway")
-                logger(f"  Suggestion: Try reducing loading, using smaller time steps, or improving mesh quality")
-            else:
-                logger(f"  Strategy: Enable line search (use_linesearch=True) to prevent this issue")
-
-            # Cleanup before raising exception
-            ksp.destroy()
-            A.destroy()
-            L.destroy()
-            if use_linesearch:
-                L_trial.destroy()
-            raise Exception(f"Newton solver encountered NaN/Inf residual at iteration {i}")
-
-        if i == 0:
-            residual_norm0 = residual_norm
-            if residual_norm0 == 0:
-                residual_norm0 = 1.0  # Avoid division by zero
-            # Check for NaN in initial residual
-            if np.isnan(residual_norm0) or np.isinf(residual_norm0):
-                logger(f"  ERROR: Initial residual is {residual_norm0}")
-                logger(f"  This indicates a problem with initial conditions or boundary conditions")
-                ksp.destroy()
-                A.destroy()
-                L.destroy()
-                if use_linesearch:
-                    L_trial.destroy()
-                raise Exception("Newton solver encountered NaN/Inf in initial residual")
-
-        # Compute relative residual
-        residual_rel = residual_norm / residual_norm0 if residual_norm0 > 0 else 0.0
-
-        # Log iteration info
-        logger(
-            f"  Iteration {i}: residual abs norm = {residual_norm:.5e} ({atol}) rel norm = {residual_rel:.5e} ({rtol})"
-        )
-
-        # Check convergence
-        if residual_norm < atol:
-            converged = True
-            logger(f"  Converged (absolute tolerance)")
-            break
-
-        if residual_rel < rtol:
-            converged = True
-            logger(f"  Converged (relative tolerance)")
-            break
-
-        # Solve linear system: A * du = -F, which is A * du = L (since L was set to -F)
-        ksp.solve(L, dx.x.petsc_vec)
-        dx.x.scatter_forward()
-
-        # Check for NaN/Inf in Newton direction
-        dx_norm = dx.x.petsc_vec.norm()
-        if np.isnan(dx_norm) or np.isinf(dx_norm):
-            logger(f"  ERROR: Newton direction has NaN/Inf values (norm = {dx_norm})")
-            logger(f"  This indicates the Jacobian is singular or ill-conditioned")
-            logger(f"  Suggestion: Check boundary conditions, material parameters, or use a different linear solver")
-            # Cleanup before raising exception
-            ksp.destroy()
-            A.destroy()
-            L.destroy()
-            if use_linesearch:
-                L_trial.destroy()
-            raise Exception(f"Newton solver encountered NaN/Inf in Newton direction at iteration {i}")
-
-        # Backtracking line search
-        if use_linesearch:
-            alpha = 1.0  # Start with full Newton step
-            ls_iter = 0
-            accepted = False
-
-            while ls_iter < max_linesearch_it and not accepted:
-                # Compute trial solution: u_trial = u - alpha * dx
-                u_trial.x.array[:] = u.x.array[:]
-                u_trial.x.petsc_vec.axpy(-alpha, dx.x.petsc_vec)
-                u_trial.x.scatter_forward()
-
-                # Temporarily update u to evaluate residual at trial point
-                u_backup = u.x.array.copy()
-                u.x.array[:] = u_trial.x.array[:]
-                u.x.scatter_forward()
-
-                # Assemble residual at trial point
-                with L_trial.localForm() as loc_L:
-                    loc_L.set(0)
-                dolfinx.fem.petsc.assemble_vector(L_trial, residual_form)
-                dolfinx.fem.petsc.apply_lifting(
-                    L_trial, [jacobian_form], bcs=[bcs], x0=[u.x.petsc_vec], alpha=-1.0
-                )
-                L_trial.ghostUpdate(
-                    addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE
-                )
-                fem.petsc.set_bc(L_trial, bcs, u.x.petsc_vec, -1.0)
-
-                # Compute trial residual norm
-                residual_norm_trial = L_trial.norm()
-
-                # Restore u to original value
-                u.x.array[:] = u_backup
-                u.x.scatter_forward()
-
-                # Check for NaN/Inf in trial residual
-                if np.isnan(residual_norm_trial) or np.isinf(residual_norm_trial):
-                    logger(
-                        f"    Line search: alpha = {alpha:.4e} produced NaN/Inf residual, backtracking..."
-                    )
-                    # This trial point is invalid, continue backtracking
-                    alpha *= 0.5
-                    ls_iter += 1
-                    continue
-
-                # Check Armijo condition: ||F(u + alpha*p)|| <= (1 - c1*alpha) * ||F(u)||
-                # For Newton, this ensures sufficient decrease in residual
-                if (
-                    residual_norm_trial <= (1.0 - c1 * alpha) * residual_norm
-                    or alpha < alpha_min
-                ):
-                    accepted = True
-                    if ls_iter > 0:
-                        logger(
-                            f"    Line search: alpha = {alpha:.4e}, residual = {residual_norm_trial:.5e} (after {ls_iter + 1} iterations)"
-                        )
-                else:
-                    # Backtrack: reduce step size
-                    alpha *= 0.5
-                    ls_iter += 1
-
-            if not accepted:
-                logger(
-                    f"    WARNING: Line search failed after {max_linesearch_it} iterations"
-                )
-                logger(
-                    f"    Last attempted alpha = {alpha:.4e}"
-                )
-                # Check if the last trial had NaN
-                if np.isnan(residual_norm_trial) or np.isinf(residual_norm_trial):
-                    logger(
-                        f"    ERROR: All line search attempts produced NaN/Inf residuals"
-                    )
-                    logger(
-                        f"    This indicates severe numerical instability"
-                    )
-                    logger(
-                        f"    Suggestion: Reduce loading magnitude, use smaller increments, or check material parameters"
-                    )
-                    # Cleanup before raising exception
-                    ksp.destroy()
-                    A.destroy()
-                    L.destroy()
-                    L_trial.destroy()
-                    raise Exception(
-                        f"Newton solver: line search failed with all NaN/Inf residuals at iteration {i}"
-                    )
-                else:
-                    logger(
-                        f"    Accepting last step with residual = {residual_norm_trial:.5e}"
-                    )
-
-            # Update solution with accepted step
-            u.x.array[:] = u_trial.x.array[:]
-            u.x.scatter_forward()
-        else:
-            # No line search: use full Newton step
-            # Update solution: u = u - dx (Newton correction)
-            u.x.petsc_vec.axpy(-1.0, dx.x.petsc_vec)
-            u.x.scatter_forward()
-
-        # Check for NaN/Inf in updated solution
-        if np.any(np.isnan(u.x.array)) or np.any(np.isinf(u.x.array)):
-            logger(f"  ERROR: Solution contains NaN/Inf values after update")
-            logger(f"  This should have been caught by line search if enabled")
-            # Cleanup before raising exception
-            ksp.destroy()
-            A.destroy()
-            L.destroy()
-            if use_linesearch:
-                L_trial.destroy()
-            raise Exception(f"Newton solver: solution contains NaN/Inf after iteration {i}")
-
-        i += 1
+    # Check convergence
+    reason = snes.getConvergedReason()
+    num_iterations = snes.getIterationNumber()
+    final_residual = snes.getFunctionNorm()
 
     # Cleanup
-    ksp.destroy()
+    snes.destroy()
     A.destroy()
-    L.destroy()
-    if use_linesearch:
-        L_trial.destroy()
+    b.destroy()
 
-    if not converged:
-        logger(f"  Newton solver did not converge after {i} iterations")
-        raise Exception(f"Newton solver did not converge after {i} iterations")
+    # Check for NaN
+    if np.isnan(final_residual) or np.isinf(final_residual):
+        logger(f"  ERROR: Final residual is {final_residual}")
+        logger(f"  SNES convergence reason: {reason}")
+        raise Exception(f"SNES solver encountered NaN/Inf in final residual")
+
+    # Determine if converged
+    converged = reason > 0
+
+    if converged:
+        logger(
+            f"  SNES solver converged in {num_iterations} iterations (reason: {reason})"
+        )
     else:
-        logger(f"  Newton solver converged in {i} iterations")
+        logger(f"  SNES solver did not converge (reason: {reason})")
+        logger(f"  Final residual norm: {final_residual:.5e}")
+        raise Exception(
+            f"SNES solver did not converge after {num_iterations} iterations (reason: {reason})"
+        )
 
-    return i, converged
+    return num_iterations, converged
 
 
 def solve_linear_problem(a, L, u, bcs=None, linear_solver="mumps", comm=None):
