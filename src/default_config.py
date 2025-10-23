@@ -25,6 +25,13 @@ params = dotdict(
     clip_gradient=0.2,  # clipping acts on lr-scaled gradients
     # Solver settings
     relative_tol=0.001,
+    snes_options={
+        "snes_type": "newtonls",
+        "snes_linesearch_type": "basic",
+        "snes_rtol": 1e-9,
+        "snes_atol": 1e-10,
+        "snes_max_it": 100,
+    },
     # Elasticity parameters
     E=10.0,
     nu=0.3,

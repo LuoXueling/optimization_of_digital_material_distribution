@@ -66,6 +66,7 @@ class NeoHookeanIncompressible(NeoHookean):
             J=J,
             comm=self.mesh.comm,
             logger=self.log,
+            snes_options=self.params.snes_options,
         )
 
     def _strain_energy_density(self, F=None, C=None, Eps=None):
@@ -177,6 +178,7 @@ class NeoHookeanIncompressibleStaggered(NeoHookeanIncompressible):
                 J=J_u,
                 comm=self.mesh.comm,
                 logger=self.log,
+                snes_options=self.params.snes_options,
             )
 
             # Project (J-1) into V_p then we have the increment of p

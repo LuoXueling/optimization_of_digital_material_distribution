@@ -569,6 +569,7 @@ class NeoHookean:
             J=J,
             comm=self.mesh.comm,
             logger=self.log,
+            snes_options=self.params.snes_options,
         )
 
     def _objective_function(self):
