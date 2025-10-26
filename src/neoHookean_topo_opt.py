@@ -203,39 +203,8 @@ class NeoHookeanTopoOpt(NeoHookean):
         self._apply_density_bcs()
 
     def _strain_energy_density(self, F=None, C=None, Eps=None):
-        to_3d = lambda x: (
-            ufl.as_tensor([[x[0, 0], x[0, 1], 0], [x[1, 0], x[1, 1], 0], [0, 0, 1]])
-            if self.params.dim == 2
-            else x
-        )
+        return self.e**self.penalty * super()._strain_energy_density(F=F, C=C, Eps=Eps)
 
-        if Eps is None:
-            if F is None:
-                F = self._deformation_gradient()
-            if C is None:
-                C = self._right_cauchy_green(F=F)
-            F = to_3d(F)
-            C = to_3d(C)
-            J = ufl.det(F)
-        else:
-            C = 2.0 * Eps + ufl.Identity(len(self.u))
-            C = to_3d(C)
-            J = ufl.sqrt(ufl.det(C))
-        Ic = ufl.tr(C)
-
-        # Elasticity parameters
-        degraded_E = self.e**self.penalty * self.params.E
-        # degraded_E = E
-        mu = degraded_E / (2 * (1 + self.params.nu))  # Lame second coefficient
-        lmbda = (
-            degraded_E
-            * self.params.nu
-            / (1 + self.params.nu)
-            / (1 - 2 * self.params.nu)
-        )  # Lame first coefficient
-
-        # Stored strain energy density (compressible neo-Hookean model)
-        psi = (mu / 2) * (Ic - 3) - mu * ufl.ln(J) + (lmbda / 2) * (ufl.ln(J)) ** 2
         return psi
 
     def _potential_energy(self, psi=None):

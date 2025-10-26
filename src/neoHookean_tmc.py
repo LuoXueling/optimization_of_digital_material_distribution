@@ -15,48 +15,21 @@ class NeoHookeanTMC(NeoHookean):
         )
 
     def _strain_energy_density(self, F=None, C=None, Eps=None):
-        to_3d = lambda x: (
-            ufl.as_tensor([[x[0, 0], x[0, 1], 0], [x[1, 0], x[1, 1], 0], [0, 0, 1]])
-            if self.params.dim == 2
-            else x
-        )
-
-        if Eps is None:
-            if F is None:
-                F = self._deformation_gradient()
-            if C is None:
-                C = self._right_cauchy_green(F=F)
-            F = to_3d(F)
-            C = to_3d(C)
-            J = ufl.det(F)
-        else:
-            C = 2.0 * Eps + ufl.Identity(len(self.u))
-            C = to_3d(C)
-            J = ufl.sqrt(ufl.det(C))
-        Ic = ufl.tr(C)
+        Ic, J, _, _ = self.strain_invariant(F=F, C=C, Eps=Eps)
 
         # Elasticity parameters
-        mu = self.params.E / (2 * (1 + self.params.nu))  # Lame second coefficient
-        kappa = self.params.E / (3 * (1 - 2 * self.params.nu))
+        mu = self.mu  # Lame second coefficient
+        kappa = self.kappa
 
         # Stored strain energy density (compressible neo-Hookean model)
         psi = (mu / 2) * (J ** (-2 / 3) * Ic - 3) + (kappa / 2) * (ufl.ln(J)) ** 2
         return psi
 
     def _potential_energy(self, psi=None):
-        to_3d = lambda x: (
-            ufl.as_tensor([[x[0, 0], x[0, 1], 0], [x[1, 0], x[1, 1], 0], [0, 0, 1]])
-            if self.params.dim == 2
-            else x
-        )
         if psi is None:
             psi = self._strain_energy_density()
 
-        F = self._deformation_gradient()
-        F = to_3d(F)
-        J = ufl.det(F)
-
-        kappa = self.params.E / (3 * (1 - 2 * self.params.nu))
+        Ic, J, F, C = self.strain_invariant()
 
         kr = self.params.kr_coef * kappa * ufl.exp(-5 * J)
 

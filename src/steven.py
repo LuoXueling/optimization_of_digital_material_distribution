@@ -64,24 +64,8 @@ class Steven(NeoHookeanIncompressible):
         return psi_nn
 
     def _strain_energy_density(self, F=None, C=None, Eps=None):
-        to_3d = lambda x: (
-            ufl.as_tensor([[x[0, 0], x[0, 1], 0], [x[1, 0], x[1, 1], 0], [0, 0, 1]])
-            if self.params.dim == 2
-            else x
-        )
+        Ic, J, F, C = self.strain_invariant(F=F, C=C, Eps=Eps)
 
-        if Eps is None:
-            if F is None:
-                F = self._deformation_gradient()
-            if C is None:
-                C = self._right_cauchy_green(F=F)
-            F = to_3d(F)
-            C = to_3d(C)
-            J = ufl.det(F)
-        else:
-            C = 2.0 * Eps + ufl.Identity(len(self.u))
-            C = to_3d(C)
-            J = ufl.sqrt(ufl.det(C))
         Cbar = J ** (-2 / 3) * C
         I1 = ufl.tr(Cbar)
         I2 = 0.5 * (I1**2 - ufl.tr(Cbar * Cbar))
@@ -102,31 +86,8 @@ class StevenNearlyIncompressible(NeoHookean):
     def _strain_energy_density_wo_constraint(self):
         return Steven._strain_energy_density_wo_constraint(self)
 
-    def _strain_energy_density(self, F=None, C=None, Eps=None):
-        to_3d = lambda x: (
-            ufl.as_tensor([[x[0, 0], x[0, 1], 0], [x[1, 0], x[1, 1], 0], [0, 0, 1]])
-            if self.params.dim == 2
-            else x
-        )
-
-        if Eps is None:
-            if F is None:
-                F = self._deformation_gradient()
-            if C is None:
-                C = self._right_cauchy_green(F=F)
-            F = to_3d(F)
-            C = to_3d(C)
-            J = ufl.det(F)
-        else:
-            C = 2.0 * Eps + ufl.Identity(len(self.u))
-            C = to_3d(C)
-            J = ufl.sqrt(ufl.det(C))
-        Cbar = J ** (-2 / 3) * C
-        I1 = ufl.tr(Cbar)
-        I2 = 0.5 * (I1**2 - ufl.tr(Cbar * Cbar))
-
-        psi_nn = self._strain_energy_density_wo_constraint()
-
+    @property
+    def kappa(self):
         c = self._get_c()
         E = (
             0.30390594 * c**4
@@ -136,6 +97,18 @@ class StevenNearlyIncompressible(NeoHookean):
             + 0.69701715
         )
         kappa = E / (3 * (1 - 2 * self.params.nu))
+        return kappa
+
+    def _strain_energy_density(self, F=None, C=None, Eps=None):
+        Ic, J, F, C = self.strain_invariant(F=F, C=C, Eps=Eps)
+
+        Cbar = J ** (-2 / 3) * C
+        I1 = ufl.tr(Cbar)
+        I2 = 0.5 * (I1**2 - ufl.tr(Cbar * Cbar))
+
+        psi_nn = self._strain_energy_density_wo_constraint()
+
+        kappa = self.kappa
 
         psi = psi_nn(I1, I2) - psi_nn(3, 3) + 0.5 * kappa * (ufl.ln(J)) ** 2
         return psi
