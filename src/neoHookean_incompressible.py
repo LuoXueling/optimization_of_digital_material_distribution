@@ -4,6 +4,7 @@ import basix.ufl
 from src.default_config import params
 from src.neoHookean import NeoHookean
 from src.neoHookean_topo_opt import NeoHookeanTopoOpt
+from src.neoHookean_tmc import NeoHookeanTMC
 from src.utils import project
 import numpy as np
 from mpi4py import MPI
@@ -90,6 +91,43 @@ class NeoHookeanIncompressible(NeoHookean):
         point_data = super()._get_point_data(main_field=u)
         point_data["pressure"] = p
         return point_data
+
+
+class NeoHookeanIncompressibleTMC(NeoHookeanIncompressible):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dx = self.domain_dx(self.association_table[self.params.main_medium])
+        self.third_medium_dx = self.domain_dx(
+            self.association_table[self.params.third_medium]
+        )
+
+    def load_boundary_conditions(self):
+        # Call parent to load displacement boundary conditions
+        NeoHookeanIncompressible.load_boundary_conditions(self)
+
+        if hasattr(self, "V_p"):
+            # Add pressure constraint in third medium region
+            pressure_bcs = self._define_domain_dirichlet_constraints(
+                function_space=self.V_p,
+                domain_marker=self.association_table[self.params.third_medium],
+                fixed_value=0.0,
+            )
+            self.dirichlet_bcs.extend(pressure_bcs)
+
+    def _strain_energy_density_third_medium(self, F=None, C=None, Eps=None):
+        Ic, J, _, _ = self.strain_invariant(F=F, C=C, Eps=Eps)
+
+        # Elasticity parameters
+        mu = self.mu  # Lame second coefficient
+
+        kappa = 1 / (2 * (1 + 0.5))
+        # Has to add a nearly incompressiblity term? instead of a strict incompressibility
+        # Adds convergence with this term.
+        psi = (mu / 2) * (J ** (-2 / 3) * Ic - 3) + 0.5 * kappa * (ufl.ln(J)) ** 2
+        return psi
+
+    def _potential_energy(self, psi=None):
+        return NeoHookeanTMC._potential_energy(self, psi)
 
 
 class NeoHookeanIncompressibleTopoOpt(NeoHookeanTopoOpt, NeoHookeanIncompressible):
