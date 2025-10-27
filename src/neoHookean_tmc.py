@@ -14,16 +14,6 @@ class NeoHookeanTMC(NeoHookean):
             self.association_table[self.params.third_medium]
         )
 
-    def _strain_energy_density(self, F=None, C=None, Eps=None):
-        Ic, J, _, _ = self.strain_invariant(F=F, C=C, Eps=Eps)
-
-        # Elasticity parameters
-        mu = self.mu  # Lame second coefficient
-        kappa = self.kappa
-
-        # Stored strain energy density (compressible neo-Hookean model)
-        psi = (mu / 2) * (J ** (-2 / 3) * Ic - 3) + (kappa / 2) * (ufl.ln(J)) ** 2
-        return psi
 
     def _potential_energy(self, psi=None):
         if psi is None:

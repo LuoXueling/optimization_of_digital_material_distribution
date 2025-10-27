@@ -885,10 +885,10 @@ class NeoHookean:
 
         # Elasticity parameters
         mu = self.mu  # Lame second coefficient
-        lmbda = self.lmbda
+        kappa = self.kappa
 
         # Stored strain energy density (compressible neo-Hookean model)
-        psi = (mu / 2) * (Ic - 3) - mu * ufl.ln(J) + (lmbda / 2) * (ufl.ln(J)) ** 2
+        psi = (mu / 2) * (J ** (-2 / 3) * Ic - 3) + (kappa / 2) * (ufl.ln(J)) ** 2
         return psi
 
     def _potential_energy(self, psi=None):

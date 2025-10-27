@@ -75,8 +75,8 @@ class NeoHookeanIncompressible(NeoHookean):
         # Elasticity parameters
         mu = self.mu  # Lame second coefficient
 
-        # Stored strain energy density (incompressible neo-Hookean model)
-        psi = (mu / 2) * (Ic - 3) - mu * ufl.ln(J) + self.p * (J - 1)
+        # Stored strain energy density
+        psi = (mu / 2) * (J ** (-2 / 3) * Ic - 3) + self.p * (J - 1)
         return psi
 
     def _get_point_data(self, main_field=None):
