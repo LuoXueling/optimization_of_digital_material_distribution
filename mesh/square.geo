@@ -67,7 +67,7 @@ Curve Loop(1) = {7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1, 2, 3, 4, 5, 6};
 //+
 Plane Surface(1) = {1};
 //+
-Transfinite Curve {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1, 2, 3, 4} = 5 Using Progression 1;
+Transfinite Curve {5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1, 2, 3, 4} = 20 Using Progression 1;
 //+
 Physical Curve("upper", 17) = {8};
 //+

@@ -28,8 +28,9 @@ params = dotdict(
         "snes_max_it": 100,
     },
     # TMC settings
-    kr_coef=1e-6 * 2**2,
-    psi_coef=1e-7,
+    tmc_regularization="rotation_angle",
+    kr_coef=1e-6 * 100,
+    psi_coef=1e-6,
     main_medium="unmarked_cells",
     third_medium="third_medium",
 )
