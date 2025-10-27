@@ -98,12 +98,13 @@ class NeoHookean:
         # Or set values by the following methods
         # e.vector().set_local(my_values)
         # e.interpolate(fe.Expression("(x[0]-width/2)*0.2+10", width=width, degree=1), M)
+
+        self.load_boundary_conditions()
+
         self.e_dirichlet_bcs, self.gradient_dirichlet_bcs = (
             self._define_design_dirichlet_boundaries()
         )
         self._apply_design_bcs()
-
-        self.load_boundary_conditions()
 
         # Create domain meshtags for subdomain integration
         self.domains = self._create_domain_meshtags()
@@ -112,7 +113,6 @@ class NeoHookean:
             domain=self.mesh,
             subdomain_data=self.domains,
         )
-
 
         self.log(f"Association table: {self.association_table}")
 
