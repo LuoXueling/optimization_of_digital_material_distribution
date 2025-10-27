@@ -24,14 +24,6 @@ class NeoHookeanTopoOpt(NeoHookean):
         self._initial_objective_values = {}
         self.penalty = self.params.init_penalty
 
-        # Initialize density Dirichlet BCs
-        self.density_dirichlet_bcs, self.gradient_dirichlet_bcs = (
-            self._define_density_dirichlet_boundaries()
-        )
-
-        # Apply initial BCs to density field
-        self._apply_density_bcs()
-
     def _normalized_scalar_expression(self, expression, name):
         if name not in self._initial_objective_values.keys():
             self._initial_objective_values[name] = self._assemble_scalar_parallel(
@@ -89,7 +81,7 @@ class NeoHookeanTopoOpt(NeoHookean):
     def _bounds(self):
         return [(self.params.min_density, 1.0)] * len(self.e.x.array)
 
-    def _define_density_dirichlet_boundaries(self):
+    def _define_design_dirichlet_boundaries(self):
         """Define Dirichlet boundary conditions for density field on boundaries
         where Neumann or Dirichlet BCs are applied to displacement field.
         Includes DOFs within num_layers element layers from the boundary.
@@ -97,8 +89,7 @@ class NeoHookeanTopoOpt(NeoHookean):
         Args:
             num_layers: Number of element layers below the boundary to fix (default=2)
         """
-        density_bcs = []
-        gradient_bcs = []
+        density_bcs, gradient_bcs = super()._define_design_dirichlet_boundaries()
 
         if self.params.fix_density_layers is None:
             return density_bcs, gradient_bcs
@@ -192,20 +183,8 @@ class NeoHookeanTopoOpt(NeoHookean):
         )
         return density_bcs, gradient_bcs
 
-    def _apply_density_bcs(self):
-        """Apply Dirichlet boundary conditions to density field."""
-        fem.set_bc(self.e.x.array, self.density_dirichlet_bcs)
-        self.e.x.scatter_forward()
-
-    def _set_optimized_variable(self, x: np.ndarray):
-        """Override to apply density BCs after setting values."""
-        super()._set_optimized_variable(x)
-        self._apply_density_bcs()
-
     def _strain_energy_density(self, F=None, C=None, Eps=None):
         return self.e**self.penalty * super()._strain_energy_density(F=F, C=C, Eps=Eps)
-
-        return psi
 
     def _potential_energy(self, psi=None):
         if psi is None:
@@ -218,9 +197,6 @@ class NeoHookeanTopoOpt(NeoHookean):
 
     def grad(self, x=None):
         grad = super().grad(x)
-
-        # Zero out gradient at boundary DOFs where density is fixed
-        fem.set_bc(grad, self.gradient_dirichlet_bcs)
 
         if self.params.gradient_filter:
             # Create temporary function for gradient to access ghost values
@@ -269,6 +245,7 @@ class NeoHookeanTopoOpt(NeoHookean):
 
             # Clip gradient values
             # filtered_grad = np.clip(filtered_grad, a_min=-0.2, a_max=0.2)
+            fem.set_bc(filtered_grad, self.gradient_dirichlet_bcs)
             grad = filtered_grad
         else:
             filtered_grad = copy.deepcopy(grad)

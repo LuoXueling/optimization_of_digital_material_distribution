@@ -98,6 +98,10 @@ class NeoHookean:
         # Or set values by the following methods
         # e.vector().set_local(my_values)
         # e.interpolate(fe.Expression("(x[0]-width/2)*0.2+10", width=width, degree=1), M)
+        self.e_dirichlet_bcs, self.gradient_dirichlet_bcs = (
+            self._define_design_dirichlet_boundaries()
+        )
+        self._apply_design_bcs()
 
         self.load_boundary_conditions()
 
@@ -426,6 +430,83 @@ class NeoHookean:
         self.log(f"Found facets for Dirichlet BCs: {marker_facets_num}")
         return dirichlet_bcs
 
+    def _define_domain_dirichlet_constraints(
+        self, function_space, domain_marker, fixed_value=0.0
+    ):
+        """
+        Define Dirichlet constraints for a field within a specified domain (volumetric region).
+
+        This method is analogous to _define_dirichlet_boundaries() but works on cells (domains)
+        instead of facets (boundaries). It can handle both regular function spaces and subspaces
+        from mixed formulations.
+
+        Args:
+            function_space: The function space to constrain (can be a subspace from mixed element)
+            domain_marker: Integer marker ID identifying the domain cells
+            fixed_value: The value to constrain the field to (scalar or appropriate for the space)
+
+        Returns:
+            List of fem.dirichletbc objects for the specified field
+        """
+        domain_dirichlet_bcs = []
+
+        # Check if function_space is a subspace (from mixed space) by trying to collapse
+        try:
+            V_collapsed, _ = function_space.collapse()
+            is_subspace = True
+        except RuntimeError:
+            is_subspace = False
+            V_collapsed = function_space
+
+        # Ensure topology connectivity for cells
+        self.mesh.topology.create_connectivity(
+            self.mesh.topology.dim, self.mesh.topology.dim
+        )
+
+        # Find cells with the specified domain marker
+        cells = self.domains.find(domain_marker)
+
+        num_cells = self.mesh.comm.allreduce(len(cells), op=MPI.SUM)
+        self.log(
+            f"Constraining field in {num_cells} cells with domain marker {domain_marker}"
+        )
+
+        if len(cells) > 0:
+            # Create a function with the fixed value
+            bc_func = fem.Function(V_collapsed)
+            bc_func.x.array[:] = fixed_value
+
+            if is_subspace:
+                # For subspaces (mixed formulation)
+                dofs = fem.locate_dofs_topological(
+                    (function_space, V_collapsed),
+                    self.mesh.topology.dim,  # Cell dimension
+                    cells,
+                )
+                bc = fem.dirichletbc(bc_func, dofs, function_space)
+            else:
+                # For regular function spaces
+                dofs = fem.locate_dofs_topological(
+                    function_space, self.mesh.topology.dim, cells  # Cell dimension
+                )
+                bc = fem.dirichletbc(bc_func, dofs)
+
+            domain_dirichlet_bcs.append(bc)
+
+        return domain_dirichlet_bcs
+
+    def _define_design_dirichlet_boundaries(self):
+        """
+        Define dirichlet BCs for self.e and gradient of self.e
+        """
+        e_bcs = []
+        gradient_bcs = []
+        return e_bcs, gradient_bcs
+
+    def _apply_design_bcs(self):
+        fem.set_bc(self.e.x.array, self.e_dirichlet_bcs)
+        self.e.x.scatter_forward()
+
     def _create_domain_meshtags(self):
         """Create cell-based MeshTags for domain integration.
 
@@ -581,6 +662,7 @@ class NeoHookean:
     def _set_optimized_variable(self, x: np.ndarray):
         self.e.x.array[:] = x
         self.e.x.scatter_forward()
+        self._apply_design_bcs()
 
     def _bounds(self):
         raise NotImplementedError()
@@ -684,7 +766,11 @@ class NeoHookean:
         grad = dj_dp.array + dfl_dp.array
         self.gradient.x.array[:] = grad
         self.mesh.comm.Barrier()
-        return grad.copy()
+
+        # Zero out gradient at boundary DOFs where e is fixed
+        grad_out = grad.copy()
+        fem.set_bc(grad_out, self.gradient_dirichlet_bcs)
+        return grad_out
 
     def optimize(self):
         x0 = self._initial_values()
