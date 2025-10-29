@@ -1,9 +1,14 @@
 import ufl
 from src.neoHookean import NeoHookean
+from src.neoHookean_tmc import NeoHookeanTMC
 from src.neoHookean_incompressible import (
     NeoHookeanIncompressible,
     NeoHookeanIncompressibleStaggered,
+    NeoHookeanIncompressibleTMC,
 )
+from src.neoHookean_topo_opt import NeoHookeanTopoOpt
+import numpy as np
+import dolfinx.fem as fem
 
 
 class Steven(NeoHookeanIncompressible):
@@ -112,6 +117,112 @@ class StevenNearlyIncompressible(NeoHookean):
 
         psi = psi_nn(I1, I2) - psi_nn(3, 3) + 0.5 * kappa * (ufl.ln(J)) ** 2
         return psi
+
+
+class StevenIncompressibleTMC(Steven):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dx = self.domain_dx(self.association_table[self.params.main_medium])
+        self.third_medium_dx = self.domain_dx(
+            self.association_table[self.params.third_medium]
+        )
+
+    def load_boundary_conditions(self):
+        return NeoHookeanIncompressibleTMC.load_boundary_conditions(self)
+
+    @property
+    def kappa(self):
+        c = self._get_c()
+        E = (
+            0.30390594 * c**4
+            - 0.96196938 * c**3
+            + 0.89915784 * c**2
+            + 0.39949939 * c
+            + 0.69701715
+        )
+        kappa = E / (3 * (1 - 2 * self.params.nu))
+        return kappa
+
+    def _strain_energy_density_third_medium(self, F=None, C=None, Eps=None):
+        return StevenNearlyIncompressible._strain_energy_density(
+            self, F=F, C=C, Eps=Eps
+        )
+
+    def _potential_energy(self, psi=None):
+        return NeoHookeanTMC._potential_energy(self, psi)
+
+    def _get_cell_data(self):
+        return NeoHookeanTMC._get_cell_data(self)
+
+
+class StevenNearlyIncompressibleTMC(StevenNearlyIncompressible):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dx = self.domain_dx(self.association_table[self.params.main_medium])
+        self.third_medium_dx = self.domain_dx(
+            self.association_table[self.params.third_medium]
+        )
+
+    def _strain_energy_density_third_medium(self, F=None, C=None, Eps=None):
+        return self._strain_energy_density(F=F, C=C, Eps=Eps)
+
+    def _potential_energy(self, psi=None):
+        return NeoHookeanTMC._potential_energy(self, psi)
+
+    def _get_cell_data(self):
+        return NeoHookeanTMC._get_cell_data(self)
+
+
+class StevenNearlyIncompressibleDistOpt(StevenNearlyIncompressible):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._initial_objective_values = {}
+
+    def _get_c(self):
+        return self.e
+
+    def _optimize_callback(self, *args) -> bool:
+        res = super()._optimize_callback(*args)
+        self.record_traction_dirichlet(step=self._optimize_step)
+        self.save_records()
+        return res
+
+    def _objective_function(self):
+        raise NotImplementedError()
+
+    def _initial_values(self):
+        return np.array([0.5] * len(self.e.x.array))
+
+    def _bounds(self):
+        return [(0.0, 1.0)] * len(self.e.x.array)
+
+    def _normalized_scalar_expression(self, expression, name):
+        return NeoHookeanTopoOpt._normalized_scalar_expression(
+            self, expression=expression, name=name
+        )
+
+    def _define_design_dirichlet_boundaries(self):
+        return NeoHookeanTopoOpt._define_design_dirichlet_boundaries(
+            self, fixed_value=None
+        )
+
+
+class StevenNearlyIncompressibleTMCDistOpt(StevenNearlyIncompressibleDistOpt):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dx = self.domain_dx(self.association_table[self.params.main_medium])
+        self.third_medium_dx = self.domain_dx(
+            self.association_table[self.params.third_medium]
+        )
+
+    def _strain_energy_density_third_medium(self, F=None, C=None, Eps=None):
+        return self._strain_energy_density(F=F, C=C, Eps=Eps)
+
+    def _potential_energy(self, psi=None):
+        return NeoHookeanTMC._potential_energy(self, psi)
+
+    def _get_cell_data(self):
+        return NeoHookeanTMC._get_cell_data(self)
 
 
 class StevenStaggered(NeoHookeanIncompressibleStaggered):

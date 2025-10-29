@@ -1,5 +1,7 @@
 from src.neoHookean import NeoHookean
 import ufl
+import dolfinx.fem as fem
+from src.utils import project
 
 
 class NeoHookeanTMC(NeoHookean):
@@ -52,6 +54,9 @@ class NeoHookeanTMC(NeoHookean):
                 f"{self.params.tmc_regularization} is not implemented."
             )
 
+        self.psi_third_medium = self.params.psi_coef * psi_third_medium
+        self.regularizaiton = regularization
+
         energy = (
             psi * self.dx
             + (self.params.psi_coef * psi_third_medium + regularization)
@@ -62,3 +67,18 @@ class NeoHookeanTMC(NeoHookean):
         for i, val in self.neumann_bcs:
             energy -= ufl.dot(val, self.u) * self.boundary_ds(i)
         return energy
+
+    def _get_cell_data(self):
+        cell_data = NeoHookean._get_cell_data(self)
+        scalar_space = fem.functionspace(self.mesh, ("DG", 0))
+        cell_data.update(
+            {
+                "third_medium_strain_energy_density": project(
+                    self.psi_third_medium, scalar_space, "psi_third_medium"
+                ),
+                "third_medium_regularization": project(
+                    self.regularizaiton, scalar_space, "regularization"
+                ),
+            }
+        )
+        return cell_data
