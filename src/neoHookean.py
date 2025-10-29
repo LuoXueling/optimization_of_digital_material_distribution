@@ -42,6 +42,7 @@ class NeoHookean:
             os.makedirs(self.vtu_dir, exist_ok=True)
             shutil.copy2(config_path, os.path.join(self.path, "config.py"))
         self.pvd_file = os.path.join(self.path, "output.pvd")
+        self.record_file = os.path.join(self.path, "records.csv")
         self.timesteps = []
         self.log = partial(
             log,
@@ -1056,9 +1057,6 @@ class NeoHookean:
         write_pvd(self.pvd_file, self.timesteps, comm=self.mesh.comm)
 
     def compute_traction_dirichlet(self, type="PK1"):
-        space_for_stress = fem.functionspace(
-            self.mesh, ("DG", 0, (self.mesh.geometry.dim, self.mesh.geometry.dim))
-        )
         if type == "PK1":
             stress = self._PK1_stress()
         elif type == "Cauchy":
@@ -1067,7 +1065,6 @@ class NeoHookean:
             raise Exception(
                 f"Stress type {type} not supported for computing tractions."
             )
-        pk1_stress = project(stress, space_for_stress, "stress")
         N = ufl.FacetNormal(self.mesh)
         e_x = fem.Constant(
             self.mesh, ScalarType([1.0, 0.0] + ([] if self.params.dim == 2 else [0.0]))
@@ -1080,9 +1077,9 @@ class NeoHookean:
             if self.params.dim == 2
             else fem.Constant(self.mesh, ScalarType((0.0, 0.0, 1.0)))
         )
-        tx = ufl.dot(ufl.dot(pk1_stress, N), e_x)
-        ty = ufl.dot(ufl.dot(pk1_stress, N), e_y)
-        tz = None if self.params.dim == 2 else ufl.dot(ufl.dot(pk1_stress, N), e_z)
+        tx = ufl.dot(ufl.dot(stress, N), e_x)
+        ty = ufl.dot(ufl.dot(stress, N), e_y)
+        tz = None if self.params.dim == 2 else ufl.dot(ufl.dot(stress, N), e_z)
         tractions = {}
         for name, key in self.association_table.items():
             global_tx = self._assemble_scalar_parallel(tx * self.boundary_ds(key))
@@ -1107,4 +1104,4 @@ class NeoHookean:
 
     def save_records(self):
         if self.mesh.comm.rank == 0:
-            self.records.to_csv(os.path.join(self.path, "records.csv"))
+            self.records.to_csv(self.record_file)
