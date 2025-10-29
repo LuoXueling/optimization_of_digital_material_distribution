@@ -262,6 +262,124 @@ def solve_nonlinear_problem(
     return num_iterations, converged
 
 
+def solve_nonlinear_problem_with_retry(
+    F,
+    u,
+    bcs=None,
+    J=None,
+    linear_solver="mumps",
+    comm=None,
+    logger=print,
+    snes_options=None,
+    num_retries=3,
+    reset_to_initial=False,
+):
+    """
+    Wrapper for solve_nonlinear_problem that implements retry logic with state restoration.
+
+    If the solver fails (raises an exception), this function will retry up to num_retries times.
+    By default, it continues from the last failed state with perturbation, or optionally resets
+    to the initial state with perturbation on each retry.
+
+    Arguments:
+        F: The residual form (UFL form)
+        u: The solution function (fem.Function)
+        bcs: List of Dirichlet boundary conditions (optional)
+        J: The Jacobian form (optional, will be computed automatically if not provided)
+        linear_solver: Linear solver type (default: "mumps")
+        comm: MPI communicator (default: MPI.COMM_WORLD)
+        logger: A callable used for logging (default: print)
+        snes_options: PETSc SNES options as dict (optional)
+        num_retries: Number of retry attempts if solver fails (default: 3)
+        reset_to_initial: If True, reset to initial state + perturbation on each retry.
+                         If False, continue from last failed state + perturbation (default: False)
+
+    Returns:
+        tuple: (num_iterations, converged) from successful solve
+
+    Raises:
+        Exception: If all retry attempts fail
+
+    Example:
+        >>> # Continue from last failed state (default)
+        >>> solve_nonlinear_problem_with_retry(
+        ...     F, u, bcs=bcs, J=J,
+        ...     snes_options={"snes_rtol": 1e-8},
+        ...     num_retries=5
+        ... )
+        >>>
+        >>> # Reset to initial state on each retry
+        >>> solve_nonlinear_problem_with_retry(
+        ...     F, u, bcs=bcs, J=J,
+        ...     snes_options={"snes_rtol": 1e-8},
+        ...     num_retries=5,
+        ...     reset_to_initial=True
+        ... )
+    """
+    if comm is None:
+        comm = MPI.COMM_WORLD
+
+    if num_retries is None or num_retries == 0:
+        return solve_nonlinear_problem(
+            F=F,
+            u=u,
+            bcs=bcs,
+            J=J,
+            linear_solver=linear_solver,
+            comm=comm,
+            logger=logger,
+            snes_options=snes_options,
+        )
+
+    # Store the initial state of u
+    u_initial = u.x.array.copy()
+
+    for attempt in range(num_retries + 1):
+        try:
+            if attempt > 0:
+                logger(f"Retry attempt {attempt}/{num_retries}...")
+
+                if reset_to_initial:
+                    # Strategy 1: Reset to initial state with increasing perturbation
+                    logger("  Strategy: Reset to initial state with perturbation")
+                    perturbation = 1e-10 * 10**attempt * np.random.randn(len(u_initial))
+                    u.x.array[:] = u_initial + perturbation * u_initial
+                else:
+                    # Strategy 2: Continue from last failed state with small perturbation
+                    logger("  Strategy: Continue from last state with perturbation")
+                    u_last = u.x.array.copy()
+                    perturbation = 1e-15 * 10**attempt * np.random.randn(len(u_last))
+                    u.x.array[:] = u_last + perturbation * u_last
+
+                u.x.scatter_forward()
+
+            # Attempt to solve
+            result = solve_nonlinear_problem(
+                F=F,
+                u=u,
+                bcs=bcs,
+                J=J,
+                linear_solver=linear_solver,
+                comm=comm,
+                logger=logger,
+                snes_options=snes_options,
+            )
+
+            # If we get here, the solve was successful
+            if attempt > 0:
+                logger(f"Retry attempt {attempt} succeeded!")
+            return result
+
+        except Exception as e:
+            if attempt < num_retries:
+                logger(f"Solver failed on attempt {attempt + 1}: {str(e)}")
+                logger(f"Restoring initial state and retrying...")
+            else:
+                # Final attempt failed, re-raise the exception
+                logger(f"All {num_retries + 1} solver attempts failed. Giving up.")
+                raise
+
+
 def solve_linear_problem(a, L, u, bcs=None, linear_solver="mumps", comm=None):
     """
     Solve a linear variational problem.

@@ -7,7 +7,7 @@ import dolfinx.io as io
 from dolfinx.la import InsertMode
 import ufl
 from src.default_config import params
-from src.solvers import solve_nonlinear_problem
+from src.solvers import solve_nonlinear_problem_with_retry
 import os
 import importlib
 import shutil
@@ -643,15 +643,20 @@ class NeoHookean:
         J = ufl.derivative(F, self.u, self.du)
 
         # Solve nonlinear variational problem
-        solve_nonlinear_problem(
-            F,
-            self.u,
-            bcs=self.dirichlet_bcs,
-            J=J,
-            comm=self.mesh.comm,
-            logger=self.log,
-            snes_options=self.params.snes_options,
-        )
+        try:
+            solve_nonlinear_problem_with_retry(
+                F,
+                self.u,
+                bcs=self.dirichlet_bcs,
+                J=J,
+                comm=self.mesh.comm,
+                logger=self.log,
+                snes_options=self.params.snes_options,
+                num_retries=self.params.num_retries,
+            )
+        except Exception as e:
+            self.save(time=int(1e6))
+            raise e
 
     def _objective_function(self):
         raise NotImplementedError()

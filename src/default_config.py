@@ -32,6 +32,7 @@ params = dotdict(
         "snes_atol": 1e-10,
         "snes_max_it": 100,
     },
+    num_retries=None,  # Number of retries after the solver fails. Add random pertubation to the initial value after failure. Useful when numerical error is essential.
     # Elasticity parameters
     E=10.0,
     nu=0.3,

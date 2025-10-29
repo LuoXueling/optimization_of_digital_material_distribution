@@ -8,7 +8,7 @@ from src.neoHookean_tmc import NeoHookeanTMC
 from src.utils import project
 import numpy as np
 from mpi4py import MPI
-from src.solvers import solve_nonlinear_problem
+from src.solvers import solve_nonlinear_problem_with_retry
 from dolfinx.la import InsertMode
 import warnings
 
@@ -60,7 +60,7 @@ class NeoHookeanIncompressible(NeoHookean):
         J = ufl.derivative(F, self.w, ufl.TrialFunction(self.V_w))
 
         # Solve variational problem
-        solve_nonlinear_problem(
+        solve_nonlinear_problem_with_retry(
             F,
             self.w,
             bcs=self.dirichlet_bcs,
@@ -68,6 +68,7 @@ class NeoHookeanIncompressible(NeoHookean):
             comm=self.mesh.comm,
             logger=self.log,
             snes_options=self.params.snes_options,
+            num_retries=self.params.num_retries,
         )
 
     def _strain_energy_density(self, F=None, C=None, Eps=None):
@@ -191,7 +192,7 @@ class NeoHookeanIncompressibleStaggered(NeoHookeanIncompressible):
             J_u = ufl.derivative(F_u, self.u, self.du)
 
             # Solve nonlinear problem
-            solve_nonlinear_problem(
+            solve_nonlinear_problem_with_retry(
                 F_u,
                 self.u,
                 bcs=self.dirichlet_bcs,
@@ -199,6 +200,7 @@ class NeoHookeanIncompressibleStaggered(NeoHookeanIncompressible):
                 comm=self.mesh.comm,
                 logger=self.log,
                 snes_options=self.params.snes_options,
+                num_retries=self.params.num_retries,
             )
 
             # Project (J-1) into V_p then we have the increment of p
