@@ -19,26 +19,31 @@ params = dotdict(
     max_penalty=4.0,
     gradient_filter=None,
     fix_density_layers=None,
+    fix_density_h=0.06,
     fictitious_interpolation=False,  # For finite strain, 10.1016/j.cma.2014.03.021
     clip_gradient=0.2,
     output_per_step=1,
     maxiter=10000,
-    lr=1,
+    lr=100,
+    fix_design_domain="third_medium",
     # clip_gradient=0.05,  # clipping acts on lr-scaled gradients
     # Solver settings
+    relative_tol=1e-6,
     snes_options={
         "snes_type": "newtonls",
         "snes_linesearch_type": "bt",
         "snes_rtol": 1e-5,
-        "snes_atol": 1e-5,
-        "snes_max_it": 200,
+        "snes_atol": 1e-10,
+        "snes_max_it": 100,
         "snes_linesearch_max_it": 100,
+        # "snes_linesearch_alpha": 1e-2,
         "snes_linesearch_order": 1,
     },
+    num_retries=None,
     # Elasticity parameters
     E=1.3373,
     nu=0.49,
-    c=1.0,
+    c=0.5,
     # TMC settings
     tmc_regularization="rotation_angle",
     kr_coef=4e-2,
@@ -47,7 +52,7 @@ params = dotdict(
     psi_coef=5e-5,
     # Suddenly diverges at contact? Increase it.
     # If the third medium is too thick and they deforms far before contact,
-    # use thinner third medium, quad elements, and decrease this value
+    # use thinner third medium, larger elements in third medium, quad elements, and decrease this value
     main_medium="main",
     third_medium="third_medium",
 )
@@ -59,6 +64,7 @@ mesh, cell_tags, boundaries, association_table = import_mesh(
 params.update(
     dotdict(
         mesh=mesh,
+        domain_dict=None,
         # Body force
         B=fem.Constant(
             mesh, ScalarType((0.0, 0.0))
@@ -69,13 +75,12 @@ params.update(
         cell_tags=cell_tags,
         boundaries=boundaries,  # boundaries is a MeshTags with some boundaries marked for neumann bcs
         association_table=association_table,
-        domain_dict=None,
         neumann_bcs=None,  # a list of tuples (boundary_id, (f_x, f_y, f_z)).
         dirichlet_bcs=[
             (association_table["bottom"], fem.Constant(mesh, ScalarType((0.0, 0.0)))),
             (
                 association_table["top"],
-                fem.Constant(mesh, ScalarType((0.0, -0.25))),
+                fem.Constant(mesh, ScalarType((0.0, -0.01))),
             ),
             (
                 association_table["third_medium_bottom"],

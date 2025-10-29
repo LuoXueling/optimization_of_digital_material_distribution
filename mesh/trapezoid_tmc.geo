@@ -74,22 +74,24 @@ Physical Curve("left", 19) = {11};
 //+
 Physical Curve("right", 20) = {13};
 //+
+Physical Curve("trapezoid_top", 22) = {3, 5, 4, 6, 2};
+//+
 Transfinite Curve {10, 7} = 5 Using Progression 1;
 //+
-Transfinite Curve {13} = 50 Using Progression 1;
+Transfinite Curve {13} = 20 Using Progression 1;
 //+
 Transfinite Curve {11} = 20 Using Progression 1;
 //+
-Transfinite Curve {12} = 100 Using Progression 1;
+Transfinite Curve {12} = 40 Using Progression 1;
 //+
 Transfinite Curve {4} = 40 Using Progression 1;
 //+
 Transfinite Curve {2} = 50 Using Progression 1;
 //+
-Transfinite Curve {1} = 80 Using Progression 1.02;
+Transfinite Curve {1} = 50 Using Progression 1;
 //+
-Transfinite Curve {3} = 60 Using Progression 1.01;
+Transfinite Curve {3} = 50 Using Progression 1;
 //+
-Transfinite Curve {5} = 7 Using Progression 1;
+Transfinite Curve {5} = 6 Using Progression 1;
 //+
-Transfinite Curve {6} = 7 Using Progression 1;
+Transfinite Curve {6} = 6 Using Progression 1;
