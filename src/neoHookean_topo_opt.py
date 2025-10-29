@@ -81,7 +81,9 @@ class NeoHookeanTopoOpt(NeoHookean):
     def _bounds(self):
         return [(self.params.min_density, 1.0)] * len(self.e.x.array)
 
-    def _define_design_dirichlet_boundaries(self):
+    def _define_design_dirichlet_boundaries(
+        self, fixed_value=1.0, boundary_markers=None
+    ):
         """Define Dirichlet boundary conditions for density field on boundaries
         where Neumann or Dirichlet BCs are applied to displacement field.
         Includes DOFs within num_layers element layers from the boundary.
@@ -89,13 +91,13 @@ class NeoHookeanTopoOpt(NeoHookean):
         Args:
             num_layers: Number of element layers below the boundary to fix (default=2)
         """
-        density_bcs, gradient_bcs = super()._define_design_dirichlet_boundaries()
+        density_bcs, gradient_bcs = NeoHookean._define_design_dirichlet_boundaries(self)
 
-        if self.params.fix_density_layers is None:
+        if self.params.fix_density_layers is None and self.params.fix_density_h is None:
             return density_bcs, gradient_bcs
 
         # Collect all boundary marker IDs from Neumann and Dirichlet BCs
-        boundary_markers = set()
+        boundary_markers = set() if boundary_markers is None else set(boundary_markers)
 
         # Add Neumann BC markers
         for marker_id, _ in self.neumann_bcs:
@@ -133,22 +135,63 @@ class NeoHookeanTopoOpt(NeoHookean):
                 # Get coordinates of boundary DOFs (may include ghost DOFs)
                 boundary_coords = dof_coords[boundary_dofs]
 
-                # Calculate characteristic element size from boundary DOFs
-                if len(boundary_coords) > 1:
-                    # Estimate element size as minimum distance between boundary DOFs
-                    dist_matrix = np.linalg.norm(
-                        boundary_coords[:, None, :] - boundary_coords[None, :, :],
-                        axis=2,
-                    )
-                    # Set diagonal to large value to avoid self-distance
-                    np.fill_diagonal(dist_matrix, np.inf)
-                    min_distances = np.min(dist_matrix, axis=1)
-                    h = np.min(min_distances[np.isfinite(min_distances)])
+                # Calculate characteristic element size h
+                if self.params.fix_density_h is None:
+                    # Calculate h from facet sizes on this boundary
+                    # This is element-order independent
+                    if len(facets) > 0:
+                        # Ensure topology connectivity
+                        self.mesh.topology.create_connectivity(
+                            self.mesh.topology.dim - 1, 0
+                        )
+
+                        # Get facet-to-vertex connectivity
+                        f_to_v = self.mesh.topology.connectivity(
+                            self.mesh.topology.dim - 1, 0
+                        )
+
+                        # Calculate sizes of all boundary facets
+                        facet_sizes = []
+                        for facet in facets:
+                            # Get vertices of this facet
+                            vertices = f_to_v.links(facet)
+                            if len(vertices) >= 2:
+                                # Get vertex coordinates
+                                vertex_coords = self.mesh.geometry.x[vertices]
+
+                                # For 2D: facet is an edge, size is length
+                                # For 3D: facet is a face, size is characteristic length
+                                if len(vertices) == 2:
+                                    # Edge length in 2D
+                                    facet_size = np.linalg.norm(
+                                        vertex_coords[1] - vertex_coords[0]
+                                    )
+                                else:
+                                    # For triangle/quad facets in 3D, use average edge length
+                                    edge_lengths = []
+                                    for i in range(len(vertices)):
+                                        j = (i + 1) % len(vertices)
+                                        edge_length = np.linalg.norm(
+                                            vertex_coords[j] - vertex_coords[i]
+                                        )
+                                        edge_lengths.append(edge_length)
+                                    facet_size = np.mean(edge_lengths)
+
+                                facet_sizes.append(facet_size)
+
+                        # Use average facet size as h for this boundary
+                        if len(facet_sizes) > 0:
+                            h = self.params.fix_density_layers * np.mean(facet_sizes)
+                        else:
+                            h = 0.0
+                    else:
+                        h = 0.0
                 else:
-                    h = 0.0
+                    # Use user-provided h (same for all boundaries)
+                    h = self.params.fix_density_h
 
                 # Expand region by num_layers * h
-                search_distance = self.params.fix_density_layers * h
+                search_distance = h
 
                 # Find all locally owned DOFs within search_distance from any boundary DOF
                 for i in range(num_owned):
@@ -164,11 +207,12 @@ class NeoHookeanTopoOpt(NeoHookean):
         if len(all_dofs_to_fix) > 0:
             dofs_array = np.array(list(all_dofs_to_fix), dtype=np.int32)
 
-            # Create BC for density with fixed value 1.0
-            bc_func_density = fem.Function(self.V_e)
-            bc_func_density.x.array[:] = 1.0
-            bc_density = fem.dirichletbc(bc_func_density, dofs_array)
-            density_bcs.append(bc_density)
+            if fixed_value is not None:
+                # Create BC for density with fixed value 1.0
+                bc_func_density = fem.Function(self.V_e)
+                bc_func_density.x.array[:] = fixed_value
+                bc_density = fem.dirichletbc(bc_func_density, dofs_array)
+                density_bcs.append(bc_density)
 
             # Create BC for gradient with fixed value 0.0
             bc_func_gradient = fem.Function(self.V_e)
@@ -245,7 +289,7 @@ class NeoHookeanTopoOpt(NeoHookean):
 
             # Clip gradient values
             # filtered_grad = np.clip(filtered_grad, a_min=-0.2, a_max=0.2)
-            fem.set_bc(filtered_grad, self.gradient_dirichlet_bcs)
+            # fem.set_bc(filtered_grad, self.gradient_dirichlet_bcs)
             grad = filtered_grad
         else:
             filtered_grad = copy.deepcopy(grad)

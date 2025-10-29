@@ -101,11 +101,6 @@ class NeoHookean:
 
         self.load_boundary_conditions()
 
-        self.e_dirichlet_bcs, self.gradient_dirichlet_bcs = (
-            self._define_design_dirichlet_boundaries()
-        )
-        self._apply_design_bcs()
-
         # Create domain meshtags for subdomain integration
         self.domains = self._create_domain_meshtags()
         self.domain_dx = ufl.dx(
@@ -113,6 +108,11 @@ class NeoHookean:
             domain=self.mesh,
             subdomain_data=self.domains,
         )
+
+        self.e_dirichlet_bcs, self.gradient_dirichlet_bcs = (
+            self._define_design_dirichlet_boundaries()
+        )
+        self._apply_design_bcs()
 
         self.log(f"Association table: {self.association_table}")
 
@@ -501,6 +501,23 @@ class NeoHookean:
         """
         e_bcs = []
         gradient_bcs = []
+        fix_design_domain = self.params.fix_design_domain
+        if fix_design_domain is not None:
+            # Probably we want the fixed domain unaltered instead of a 1.0
+            # e_bcs.extend(
+            #     self._define_domain_dirichlet_constraints(
+            #         function_space=self.V_e,
+            #         domain_marker=self.association_table[fix_design_domain],
+            #         fixed_value=1.0,
+            #     )
+            # )
+            gradient_bcs.extend(
+                self._define_domain_dirichlet_constraints(
+                    function_space=self.V_e,
+                    domain_marker=self.association_table[fix_design_domain],
+                    fixed_value=0.0,
+                )
+            )
         return e_bcs, gradient_bcs
 
     def _apply_design_bcs(self):
@@ -676,10 +693,10 @@ class NeoHookean:
         raise NotImplementedError()
 
     def eval(self, x):
-        self.log(
-            f"Taking input: min={self.mesh.comm.allreduce(np.min(x), op=MPI.MIN)}, max={self.mesh.comm.allreduce(np.max(x), op=MPI.MAX)}"
-        )
         self._set_optimized_variable(x)
+        self.log(
+            f"Taking input: min={self.mesh.comm.allreduce(np.min(self.e.x.array[:]), op=MPI.MIN)}, max={self.mesh.comm.allreduce(np.max(self.e.x.array[:]), op=MPI.MAX)}"
+        )
         # Solve \partial L/\partial \lambda = 0, i.e. the governing equation it self
         self.log("Solving forward problem")
         self.mesh.comm.Barrier()
@@ -769,13 +786,11 @@ class NeoHookean:
         dfl_dp.scatter_reverse(InsertMode.add)
 
         grad = dj_dp.array + dfl_dp.array
-        self.gradient.x.array[:] = grad
         self.mesh.comm.Barrier()
 
-        # Zero out gradient at boundary DOFs where e is fixed
-        grad_out = grad.copy()
-        fem.set_bc(grad_out, self.gradient_dirichlet_bcs)
-        return grad_out
+        self.gradient.x.array[:] = grad
+        self.gradient.x.scatter_forward()
+        return grad.copy()
 
     def optimize(self):
         x0 = self._initial_values()
@@ -790,6 +805,7 @@ class NeoHookean:
             self._loss_history.append(res)
             self._stage_loss_history.append(res)
             grad = self.grad()
+            fem.set_bc(grad, self.gradient_dirichlet_bcs)
             x -= np.clip(
                 self.params.lr * grad,
                 a_min=-self.params.clip_gradient,
