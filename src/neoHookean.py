@@ -241,21 +241,21 @@ class NeoHookean:
                 else:
                     self.neumann_bcs.append((marker_id, val))
 
-            if len(facets) > 0:
-                # Update boundaries MeshTags
-                values = np.full(len(facets), marker_id, dtype=np.int32)
-                if self.boundaries.indices.size == 0:
-                    self.boundaries = dmesh.meshtags(
-                        self.mesh, self.mesh.topology.dim - 1, facets, values
-                    )
-                else:
-                    all_indices = np.concatenate([self.boundaries.indices, facets])
-                    all_values = np.concatenate([self.boundaries.values, values])
-                    self.boundaries = dmesh.meshtags(
-                        self.mesh, self.mesh.topology.dim - 1, all_indices, all_values
-                    )
+            # Update boundaries MeshTags
+            values = np.full(len(facets), marker_id, dtype=np.int32)
+            if self.boundaries.indices.size == 0:
+                self.boundaries = dmesh.meshtags(
+                    self.mesh, self.mesh.topology.dim - 1, facets, values
+                )
+            else:
+                all_indices = np.concatenate([self.boundaries.indices, facets])
+                all_values = np.concatenate([self.boundaries.values, values])
+                self.boundaries = dmesh.meshtags(
+                    self.mesh, self.mesh.topology.dim - 1, all_indices, all_values
+                )
 
         self.dirichlet_bcs = self._define_dirichlet_boundaries()
+        self.adjoint_bcs = self._define_dirichlet_boundaries(fixed_value=0.0)
 
         self.boundary_ds = ufl.ds(
             metadata={"quadrature_degree": self.params.q_deg},
@@ -472,27 +472,25 @@ class NeoHookean:
             f"Constraining field in {num_cells} cells with domain marker {domain_marker}"
         )
 
-        if len(cells) > 0:
-            # Create a function with the fixed value
-            bc_func = fem.Function(V_collapsed)
-            bc_func.x.array[:] = fixed_value
+        # Create a function with the fixed value (always available)
+        bc_func = fem.Function(V_collapsed)
+        bc_func.x.array[:] = fixed_value
 
-            if is_subspace:
-                # For subspaces (mixed formulation)
-                dofs = fem.locate_dofs_topological(
-                    (function_space, V_collapsed),
-                    self.mesh.topology.dim,  # Cell dimension
-                    cells,
-                )
+        # Locate DOFs collectively on all ranks, even if cells is empty locally
+        if is_subspace:
+            dofs = fem.locate_dofs_topological(
+                (function_space, V_collapsed), self.mesh.topology.dim, cells
+            )
+            if dofs.size > 0:
                 bc = fem.dirichletbc(bc_func, dofs, function_space)
-            else:
-                # For regular function spaces
-                dofs = fem.locate_dofs_topological(
-                    function_space, self.mesh.topology.dim, cells  # Cell dimension
-                )
+                domain_dirichlet_bcs.append(bc)
+        else:
+            dofs = fem.locate_dofs_topological(
+                function_space, self.mesh.topology.dim, cells
+            )
+            if dofs.size > 0:
                 bc = fem.dirichletbc(bc_func, dofs)
-
-            domain_dirichlet_bcs.append(bc)
+                domain_dirichlet_bcs.append(bc)
 
         return domain_dirichlet_bcs
 
@@ -575,14 +573,14 @@ class NeoHookean:
                     self.mesh, self.mesh.topology.dim, marker_func
                 )
 
-                if len(cells) > 0:
-                    # Add to existing arrays
-                    values = np.full(len(cells), marker_id, dtype=np.int32)
-                    existing_indices = np.concatenate([existing_indices, cells])
-                    existing_values = np.concatenate([existing_values, values])
+                # Add to existing arrays
+                values = np.full(len(cells), marker_id, dtype=np.int32)
+                existing_indices = np.concatenate([existing_indices, cells])
+                existing_values = np.concatenate([existing_values, values])
 
-                    # Log the number of cells marked
-                    num_cells_global = self.mesh.comm.allreduce(len(cells), op=MPI.SUM)
+                # Log the number of cells marked
+                num_cells_global = self.mesh.comm.allreduce(len(cells), op=MPI.SUM)
+                if num_cells_global > 0:
                     self.log(
                         f"Marked {num_cells_global} cells for domain '{marker_key}' with ID {marker_id}"
                     )
@@ -601,32 +599,30 @@ class NeoHookean:
             [cell for cell in all_cells if cell not in marked_cells], dtype=np.int32
         )
 
-        if len(unmarked_cells) > 0:
-            # Assign a marker ID for unmarked cells
-            unmarked_marker_key = "unmarked_cells"
+        # Assign a marker ID for unmarked cells
+        unmarked_marker_key = "unmarked_cells"
 
-            if unmarked_marker_key in self.association_table.keys():
-                unmarked_marker_id = self.association_table[unmarked_marker_key]
-            else:
-                # Find a unique marker ID
-                unmarked_marker_id = 1  # Default to 0 for unmarked cells
-                while unmarked_marker_id in self.association_table.values():
-                    unmarked_marker_id += 1
+        if unmarked_marker_key in self.association_table.keys():
+            unmarked_marker_id = self.association_table[unmarked_marker_key]
+        else:
+            # Find a unique marker ID
+            unmarked_marker_id = 1  # Default to 0 for unmarked cells
+            while unmarked_marker_id in self.association_table.values():
+                unmarked_marker_id += 1
 
-                # Store in association table
-                self.association_table[unmarked_marker_key] = unmarked_marker_id
+            # Store in association table
+            self.association_table[unmarked_marker_key] = unmarked_marker_id
 
-            # Add unmarked cells to the arrays
-            unmarked_values = np.full(
-                len(unmarked_cells), unmarked_marker_id, dtype=np.int32
-            )
-            existing_indices = np.concatenate([existing_indices, unmarked_cells])
-            existing_values = np.concatenate([existing_values, unmarked_values])
+        # Add unmarked cells to the arrays
+        unmarked_values = np.full(
+            len(unmarked_cells), unmarked_marker_id, dtype=np.int32
+        )
+        existing_indices = np.concatenate([existing_indices, unmarked_cells])
+        existing_values = np.concatenate([existing_values, unmarked_values])
 
-            # Log the number of unmarked cells
-            num_unmarked_global = self.mesh.comm.allreduce(
-                len(unmarked_cells), op=MPI.SUM
-            )
+        # Log the number of unmarked cells
+        num_unmarked_global = self.mesh.comm.allreduce(len(unmarked_cells), op=MPI.SUM)
+        if num_unmarked_global > 0:
             self.log(
                 f"Marked {num_unmarked_global} unmarked cells with ID {unmarked_marker_id}"
             )
@@ -756,8 +752,6 @@ class NeoHookean:
             state_var,
             l_solve,
         )
-        # No values at DirichletBC boundaries
-        bcs = self._define_dirichlet_boundaries(fixed_value=0.0)
 
         # Solve using LinearProblem
         from dolfinx.fem.petsc import LinearProblem
@@ -765,7 +759,7 @@ class NeoHookean:
         problem = LinearProblem(
             lhs_ufl,
             dj_du_ufl,
-            bcs=bcs,
+            bcs=self.adjoint_bcs,
             petsc_options={
                 "ksp_type": "preonly",
                 "pc_type": "lu",
@@ -836,6 +830,11 @@ class NeoHookean:
         if self._optimize_step % self.params.output_per_step == 0:
             self.save(time=self._optimize_step)
         self._optimize_step += 1
+        if len(self._loss_history) > 1:
+            self.log(
+                f"Convergence criterion: {(1 - self._loss_history[-1] / self._loss_history[-2])
+                * np.sign(self._loss_history[-1])} < {self.params.relative_tol}"
+            )
         if len(self._loss_history) > 1 and (
             0
             < (1 - self._loss_history[-1] / self._loss_history[-2])

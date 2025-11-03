@@ -18,7 +18,6 @@ params = dotdict(
     init_penalty=1.0,
     max_penalty=4.0,
     gradient_filter=None,
-    fix_density_layers=None,
     fix_density_h=0.06,
     fictitious_interpolation=False,  # For finite strain, 10.1016/j.cma.2014.03.021
     clip_gradient=0.2,

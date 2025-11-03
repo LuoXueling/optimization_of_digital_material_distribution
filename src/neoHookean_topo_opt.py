@@ -93,7 +93,7 @@ class NeoHookeanTopoOpt(NeoHookean):
         """
         density_bcs, gradient_bcs = NeoHookean._define_design_dirichlet_boundaries(self)
 
-        if self.params.fix_density_layers is None and self.params.fix_density_h is None:
+        if self.params.fix_density_h is None:
             return density_bcs, gradient_bcs
 
         # Collect all boundary marker IDs from Neumann and Dirichlet BCs
@@ -121,110 +121,65 @@ class NeoHookeanTopoOpt(NeoHookean):
         # Get number of locally owned DOFs
         num_owned = self.V_e.dofmap.index_map.size_local
 
-        # Collect all DOFs to fix (only locally owned)
+        # Collect all boundary dofs (union across markers) and DOFs to fix
+        all_boundary_dofs = set()
         all_dofs_to_fix = set()
 
         for marker_id in boundary_markers:
             facets = self.boundaries.find(marker_id)
-            if len(facets) > 0:
-                # Locate DOFs on boundary facets
-                boundary_dofs = fem.locate_dofs_topological(
-                    self.V_e, self.mesh.topology.dim - 1, facets
-                )
 
-                # Get coordinates of boundary DOFs (may include ghost DOFs)
-                boundary_coords = dof_coords[boundary_dofs]
+            # Ensure necessary topology connectivity exists (both directions)
+            self.mesh.topology.create_connectivity(
+                self.mesh.topology.dim - 1, self.mesh.topology.dim
+            )
 
-                # Calculate characteristic element size h
-                if self.params.fix_density_h is None:
-                    # Calculate h from facet sizes on this boundary
-                    # This is element-order independent
-                    if len(facets) > 0:
-                        # Ensure topology connectivity
-                        self.mesh.topology.create_connectivity(
-                            self.mesh.topology.dim - 1, 0
-                        )
+            # Call collectively on all ranks (even if local facets array is empty)
+            boundary_dofs = fem.locate_dofs_topological(
+                self.V_e, self.mesh.topology.dim - 1, facets
+            )
 
-                        # Get facet-to-vertex connectivity
-                        f_to_v = self.mesh.topology.connectivity(
-                            self.mesh.topology.dim - 1, 0
-                        )
+            # Accumulate union of boundary DOFs (may include ghost DOFs)
+            all_boundary_dofs.update(boundary_dofs.tolist())
 
-                        # Calculate sizes of all boundary facets
-                        facet_sizes = []
-                        for facet in facets:
-                            # Get vertices of this facet
-                            vertices = f_to_v.links(facet)
-                            if len(vertices) >= 2:
-                                # Get vertex coordinates
-                                vertex_coords = self.mesh.geometry.x[vertices]
+        # Perform a single radius query with the union of boundary DOFs
+        boundary_coords = dof_coords[np.fromiter(all_boundary_dofs, dtype=np.int32)]
+        search_distance = float(self.params.fix_density_h)
 
-                                # For 2D: facet is an edge, size is length
-                                # For 3D: facet is a face, size is characteristic length
-                                if len(vertices) == 2:
-                                    # Edge length in 2D
-                                    facet_size = np.linalg.norm(
-                                        vertex_coords[1] - vertex_coords[0]
-                                    )
-                                else:
-                                    # For triangle/quad facets in 3D, use average edge length
-                                    edge_lengths = []
-                                    for i in range(len(vertices)):
-                                        j = (i + 1) % len(vertices)
-                                        edge_length = np.linalg.norm(
-                                            vertex_coords[j] - vertex_coords[i]
-                                        )
-                                        edge_lengths.append(edge_length)
-                                    facet_size = np.mean(edge_lengths)
+        # Build KD-tree once for efficient radius queries
+        kd_tree = cKDTree(dof_coords)
 
-                                facet_sizes.append(facet_size)
-
-                        # Use average facet size as h for this boundary
-                        if len(facet_sizes) > 0:
-                            h = self.params.fix_density_layers * np.mean(facet_sizes)
-                        else:
-                            h = 0.0
-                    else:
-                        h = 0.0
-                else:
-                    # Use user-provided h (same for all boundaries)
-                    h = self.params.fix_density_h
-
-                # Expand region by num_layers * h
-                search_distance = h
-
-                # Find all locally owned DOFs within search_distance from any boundary DOF
-                for i in range(num_owned):
-                    dof_pos = dof_coords[i]
-                    # Calculate minimum distance to any boundary DOF
-                    distances = np.linalg.norm(boundary_coords - dof_pos, axis=1)
-                    min_dist = np.min(distances)
-
-                    if min_dist <= search_distance:
-                        all_dofs_to_fix.add(i)
+        neighbor_lists = kd_tree.query_ball_point(boundary_coords, r=search_distance)
+        added = 0
+        for lst in neighbor_lists:
+            for idx in lst:
+                if idx < num_owned:  # keep only locally owned dofs
+                    if idx not in all_dofs_to_fix:
+                        added += 1
+                    all_dofs_to_fix.add(idx)
 
         # Create BCs with all collected DOFs (only locally owned)
-        if len(all_dofs_to_fix) > 0:
-            dofs_array = np.array(list(all_dofs_to_fix), dtype=np.int32)
+        dofs_array = np.array(list(all_dofs_to_fix), dtype=np.int32)
 
-            if fixed_value is not None:
-                # Create BC for density with fixed value 1.0
-                bc_func_density = fem.Function(self.V_e)
-                bc_func_density.x.array[:] = fixed_value
+        if fixed_value is not None:
+            # Create BC for density with fixed value 1.0
+            bc_func_density = fem.Function(self.V_e)
+            bc_func_density.x.array[:] = fixed_value
+            bc_func_density.x.scatter_forward()
+            if len(all_dofs_to_fix) > 0:
                 bc_density = fem.dirichletbc(bc_func_density, dofs_array)
                 density_bcs.append(bc_density)
 
-            # Create BC for gradient with fixed value 0.0
-            bc_func_gradient = fem.Function(self.V_e)
-            bc_func_gradient.x.array[:] = 0.0
+        # Create BC for gradient with fixed value 0.0
+        bc_func_gradient = fem.Function(self.V_e)
+        bc_func_gradient.x.array[:] = 0.0
+        bc_func_gradient.x.scatter_forward()
+        if len(all_dofs_to_fix) > 0:
             bc_gradient = fem.dirichletbc(bc_func_gradient, dofs_array)
             gradient_bcs.append(bc_gradient)
 
         # Parallel-safe: sum across all processes
         total_dofs_fixed = self.mesh.comm.allreduce(len(all_dofs_to_fix), op=MPI.SUM)
-        self.log(
-            f"Created density Dirichlet BCs fixing {total_dofs_fixed} DOFs (including {self.params.fix_density_layers} layers from boundaries)"
-        )
+        self.log(f"Created density Dirichlet BCs fixing {total_dofs_fixed} DOFs")
         return density_bcs, gradient_bcs
 
     def _strain_energy_density(self, F=None, C=None, Eps=None):

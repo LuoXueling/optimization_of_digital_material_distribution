@@ -116,7 +116,6 @@ params = dotdict(
     init_penalty=1,
     max_penalty=4.0,
     gradient_filter=0.12,
-    fix_density_layers=2,
     clip_gradient=0.2,
     output_per_step=1,
     maxiter=10000,
