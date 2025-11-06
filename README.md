@@ -7,8 +7,9 @@ This repo is built upon Python 3.12 and FEniCSx (DOLFINx)
 ```shell
 conda create -n fenicsx python=3.12
 conda activate fenicsx
-conda install -c conda-forge fenics-dolfinx mpich pyvista 
-conda install -c conda-forge gmsh python-gmsh matplotlib pandas scipy
+conda install -c conda-forge fenics-dolfinx=0.9.0 mpich pyvista 
+conda install -c conda-forge gmsh python-gmsh matplotlib pandas scipy 
+conda install -c conda-forge adios2 adios4dolfinx=0.9.5
 ```
 
 ## Usage
@@ -55,21 +56,19 @@ mesh, cell_tags, boundaries, association_table = import_mesh("square", directory
 params.update(
     dotdict(
         mesh=mesh,
-        # Body force
-        B=fem.Constant(mesh, ScalarType((0.0, 0.0))),  # Body force per unit volume # Modify for 3D
         # Mark Dirichlet boundary subdomains and values
         dirichlet_bcs_dict={
-            lambda x: np.isclose(x[0], 0.0): fem.Constant(mesh, ScalarType((0.0, 0.0))),  # Modify for 3D
+            lambda x: np.isclose(x[0], 0.0): (0.0, 0.0),  # Modify for 3D
         },
         neumann_bcs_dict=None,
         boundaries=boundaries,  # boundaries is a MeshTags with some boundaries marked for neumann bcs
         association_table=association_table,
         neumann_bcs=[
-            (association_table["upper"], fem.Constant(mesh, ScalarType((0.0, -0.001)))),
-            (association_table["right"], fem.Constant(mesh, ScalarType((-0.001, 0.0)))),
+            (association_table["upper"], (0.0, -0.001)),
+            (association_table["right"], (-0.001, 0.0)),
         ],  # a list of tuples (boundary_id, (f_x, f_y, f_z)).
         dirichlet_bcs=[
-            (association_table["bottom"], fem.Constant(mesh, ScalarType((0.0, 0.0))))
+            (association_table["bottom"], (0.0, 0.0))
         ],  # a list of tuples (boundary_id, (u_x, u_y, u_z))
     )
 )
@@ -140,21 +139,13 @@ _mesh = dmesh.create_rectangle(
 params.update(
     dotdict(
         mesh=_mesh,
-        # Body force
-        B=fem.Constant(
-            _mesh, ScalarType((0.0, 0.0))
-        ),  # Body force per unit volume # Modify for 3D
         # Mark Dirichlet boundary subdomains and values
         dirichlet_bcs_dict={
-            lambda x: np.isclose(x[0], 0.0): fem.Constant(
-                _mesh, ScalarType((0.0, 0.0))
-            ),  # Modify for 3D
+            lambda x: np.isclose(x[0], 0.0): (0.0, 0.0),  # Modify for 3D
         },
         neumann_bcs_dict={
             lambda x: np.isclose(x[0], params.width)
-            & np.isclose(x[1], 0, atol=params.mesh_size * 1.1): fem.Constant(
-                _mesh, ScalarType((0.0, -0.001))
-            ),  # Modify for 3D
+            & np.isclose(x[1], 0, atol=params.mesh_size * 1.1): (0.0, -0.001),  # Modify for 3D
         },
     )
 )

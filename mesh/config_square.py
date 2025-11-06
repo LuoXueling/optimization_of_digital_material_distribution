@@ -32,10 +32,6 @@ mesh, cell_tags, boundaries, association_table = import_mesh("square", directory
 params.update(
     dotdict(
         mesh=mesh,
-        # Body force
-        B=fem.Constant(
-            mesh, ScalarType((0.0, 0.0))
-        ),  # Body force per unit volume # Modify for 3D
         # Mark Dirichlet boundary subdomains and values
         dirichlet_bcs_dict={
             # lambda x: np.isclose(x[1], 1.0): {1: lambda x: -0.01 * np.ones_like(x[0])}
@@ -48,8 +44,8 @@ params.update(
         boundaries=boundaries,  # boundaries is a MeshTags with some boundaries marked for neumann bcs
         association_table=association_table,
         neumann_bcs=[
-            # (association_table["upper"], fem.Constant(mesh, ScalarType((0.0, -0.001)))),
-            # (association_table["right"], fem.Constant(mesh, ScalarType((-0.01, 0.0)))),
+            # (association_table["upper"], (0.0, -0.001)),
+            # (association_table["right"], (-0.01, 0.0)),
             (
                 association_table["upper"],
                 lambda x: np.vstack([np.zeros_like(x[0]), 0.001 * (x[0] - 0.75) * 4]),
@@ -60,7 +56,7 @@ params.update(
             ),
         ],  # a list of tuples (boundary_id, (f_x, f_y, f_z)).
         dirichlet_bcs=[
-            (association_table["bottom"], fem.Constant(mesh, ScalarType((0.0, 0.0)))),
+            (association_table["bottom"], (0.0, 0.0)),
             # (association_table["upper"], {1: lambda x: -0.001 * np.ones_like(x[0])}),
             # (
             #     association_table["right"],

@@ -37,16 +37,14 @@ _mesh = dmesh.create_box(
 params.update(
     dotdict(
         mesh=_mesh,
-        # Body force
-        B=fem.Constant(_mesh, ScalarType((0.0, 0.0, 0.0))),
         # Mark Dirichlet boundary subdomains and values
         dirichlet_bcs_dict={
-            lambda x: np.isclose(x[1], 0.0): fem.Constant(
-                _mesh, ScalarType((0.0, 0.0, 0.0))
+            lambda x: np.isclose(x[1], 0.0): (0.0, 0.0, 0.0),
+            lambda x: np.isclose(x[1], params.length, atol=params.mesh_size): (
+                0.0,
+                0.1,
+                0.0,
             ),
-            lambda x: np.isclose(
-                x[1], params.length, atol=params.mesh_size
-            ): fem.Constant(_mesh, ScalarType((0.0, 0.1, 0.0))),
         },
         neumann_bcs_dict=None,
     )

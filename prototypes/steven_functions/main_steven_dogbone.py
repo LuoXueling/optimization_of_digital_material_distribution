@@ -17,14 +17,10 @@ problem = Steven(config_path=config_path)
 
 for step, stretch in enumerate(np.linspace(0, 2, 20)):
     problem.params.dirichlet_bcs_dict = {
-        lambda x: np.isclose(x[1], 0.0): fem.Constant(
-            problem.mesh, ScalarType((0.0, 0.0, 0.0))
-        ),
+        lambda x: np.isclose(x[1], 0.0): (0.0, 0.0, 0.0),
         lambda x: np.isclose(
             x[1], problem.params.length, atol=problem.params.mesh_size
-        ): fem.Constant(
-            problem.mesh, ScalarType((0.0, stretch * problem.params.length, 0.0))
-        ),
+        ): (0.0, stretch * problem.params.length, 0.0),
     }
     problem.load_boundary_conditions()
     problem.forward()

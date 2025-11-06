@@ -61,7 +61,7 @@ class NeoHookeanTMC(NeoHookean):
             psi * self.dx
             + (self.params.psi_coef * psi_third_medium + regularization)
             * self.third_medium_dx
-            - ufl.dot(self.params.B, self.u) * self.dx
+            - ufl.dot(self.B, self.u) * self.dx
         )
         # Neumann boundaries
         for i, val in self.neumann_bcs:

@@ -43,10 +43,6 @@ mesh, cell_tags, boundaries, association_table = import_mesh(
 params.update(
     dotdict(
         mesh=mesh,
-        # Body force
-        B=fem.Constant(
-            mesh, ScalarType((0.0, 0.0))
-        ),  # Body force per unit volume # Modify for 3D
         cell_tags=cell_tags,
         boundaries=boundaries,
         association_table=association_table,
@@ -55,9 +51,9 @@ params.update(
         dirichlet_bcs=[
             (
                 association_table["bottom"],
-                fem.Constant(mesh, ScalarType((0.0, 0.0))),
+                (0.0, 0.0),
             ),
-            (association_table["ball"], fem.Constant(mesh, ScalarType((0.0, 0.0)))),
+            (association_table["ball"], (0.0, 0.0)),
         ],
         dirichlet_bcs_dict=None,
         neumann_bcs_dict=None,

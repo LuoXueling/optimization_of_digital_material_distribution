@@ -25,9 +25,7 @@ for i in range(total_step):
     print(f"{i+1}/{total_step}")
     # For c-shape
     problem.params.dirichlet_bcs_dict = {
-        lambda x: np.isclose(x[0], 0.0): fem.Constant(
-            problem.mesh, ScalarType((0.0, 0.0))
-        ),  # Modify for 3D
+        lambda x: np.isclose(x[0], 0.0): (0.0, 0.0),  # Modify for 3D
         lambda x: np.logical_and(x[0] >= 10, np.isclose(x[1], problem.params.height)): {
             1: -10 * (i + 1) / total_step
         },
@@ -38,20 +36,18 @@ for i in range(total_step):
     #     lambda x: np.logical_and(
     #         np.logical_and(x[0] >= 0.8, x[0] <= 1.2),
     #         np.isclose(x[1], problem.params.height),
-    #     ): fem.Constant(
-    #         problem.mesh, ScalarType((0.0, -1 * (i + 1) / total_step))
-    #     ),  # Modify for 3D
+    #     ): (0.0, -1 * (i + 1) / total_step),  # Modify for 3D
     # }
 
     # For config_ball
     # problem.params.dirichlet_bcs = [
     #     (
     #         problem.association_table["bottom"],
-    #         fem.Constant(problem.mesh, ScalarType((0.0, 0.0))),
+    #         (0.0, 0.0),
     #     ),
     #     (
     #         problem.association_table["ball"],
-    #         fem.Constant(problem.mesh, ScalarType((0.0, -0.55 * (i + 1) / total_step))),
+    #         (0.0, -0.55 * (i + 1) / total_step),
     #     ),
     # ]
     problem.load_boundary_conditions()

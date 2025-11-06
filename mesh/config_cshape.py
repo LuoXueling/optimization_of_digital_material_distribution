@@ -46,10 +46,6 @@ _mesh = dmesh.create_rectangle(
 params.update(
     dotdict(
         mesh=_mesh,
-        # Body force
-        B=fem.Constant(
-            _mesh, ScalarType((0.0, 0.0))
-        ),  # Body force per unit volume # Modify for 3D
         cell_tags=None,
         domain_dict={
             lambda x: np.logical_or(
@@ -62,9 +58,7 @@ params.update(
         },
         # Mark Dirichlet boundary subdomains and values
         dirichlet_bcs_dict={
-            lambda x: np.isclose(x[0], 0.0): fem.Constant(
-                _mesh, ScalarType((0.0, 0.0))
-            ),  # Modify for 3D
+            lambda x: np.isclose(x[0], 0.0): (0.0, 0.0),  # Modify for 3D
             lambda x: np.logical_and(x[0] >= 10, np.isclose(x[1], params.height)): {
                 1: -0.25
             },

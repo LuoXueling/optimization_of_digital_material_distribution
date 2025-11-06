@@ -76,6 +76,8 @@ class NeoHookean:
             )
         )
 
+        self.B = fem.Constant(self.mesh, ScalarType(self.params.B))
+
         # define function space
         self.V_u = fem.functionspace(
             self.mesh, ("Lagrange", self.params.elem_order, (self.mesh.geometry.dim,))
@@ -384,6 +386,8 @@ class NeoHookean:
                             # Function of coordinates
                             bc_func.interpolate(val)
                         else:
+                            if isinstance(val, tuple):
+                                val = fem.Constant(self.mesh, ScalarType(val))
                             bc_func.interpolate(
                                 lambda x: np.tile(val.value, (x.shape[1], 1)).T
                             )
@@ -421,6 +425,8 @@ class NeoHookean:
                             dirichlet_bcs.append(bc)
                     else:
                         # Constant value (fem.Constant or similar)
+                        if isinstance(val, tuple):
+                            val = fem.Constant(self.mesh, ScalarType(val))
                         bc_val = val
                         dofs = fem.locate_dofs_topological(
                             self.V_u, self.mesh.topology.dim - 1, facets
@@ -830,12 +836,12 @@ class NeoHookean:
         if self._optimize_step % self.params.output_per_step == 0:
             self.save(time=self._optimize_step)
         self._optimize_step += 1
-        if len(self._loss_history) > 1:
+        if len(self._loss_history) > 2:
             self.log(
                 f"Convergence criterion: {(1 - self._loss_history[-1] / self._loss_history[-2])
                 * np.sign(self._loss_history[-1])} < {self.params.relative_tol}"
             )
-        if len(self._loss_history) > 1 and (
+        if len(self._loss_history) > 2 and (
             0
             < (1 - self._loss_history[-1] / self._loss_history[-2])
             * np.sign(self._loss_history[-1])
@@ -915,7 +921,7 @@ class NeoHookean:
     def _potential_energy(self, psi=None):
         if psi is None:
             psi = self._strain_energy_density()
-        energy = psi * self.dx - ufl.dot(self.params.B, self.u) * self.dx
+        energy = psi * self.dx - ufl.dot(self.B, self.u) * self.dx
         # Neumann boundaries
         for i, val in self.neumann_bcs:
             energy -= ufl.dot(val, self.u) * self.boundary_ds(i)

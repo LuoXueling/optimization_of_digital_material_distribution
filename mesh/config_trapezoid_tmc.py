@@ -64,10 +64,6 @@ params.update(
     dotdict(
         mesh=mesh,
         domain_dict=None,
-        # Body force
-        B=fem.Constant(
-            mesh, ScalarType((0.0, 0.0))
-        ),  # Body force per unit volume # Modify for 3D
         # Mark Dirichlet boundary subdomains and values
         dirichlet_bcs_dict=None,
         neumann_bcs_dict=None,
@@ -76,10 +72,10 @@ params.update(
         association_table=association_table,
         neumann_bcs=None,  # a list of tuples (boundary_id, (f_x, f_y, f_z)).
         dirichlet_bcs=[
-            (association_table["bottom"], fem.Constant(mesh, ScalarType((0.0, 0.0)))),
+            (association_table["bottom"], (0.0, 0.0)),
             (
                 association_table["top"],
-                fem.Constant(mesh, ScalarType((0.0, -0.01))),
+                (0.0, -0.01),
             ),
             (
                 association_table["third_medium_bottom"],
