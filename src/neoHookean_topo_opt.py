@@ -82,7 +82,7 @@ class NeoHookeanTopoOpt(NeoHookean):
         return [(self.params.min_density, 1.0)] * len(self.e.x.array)
 
     def _define_design_dirichlet_boundaries(
-        self, fixed_value=1.0, boundary_markers=None
+        self, fixed_value=1.0, boundary_markers=None, function_space=None
     ):
         """Define Dirichlet boundary conditions for density field on boundaries
         where Neumann or Dirichlet BCs are applied to displacement field.
@@ -91,7 +91,18 @@ class NeoHookeanTopoOpt(NeoHookean):
         Args:
             num_layers: Number of element layers below the boundary to fix (default=2)
         """
-        density_bcs, gradient_bcs = NeoHookean._define_design_dirichlet_boundaries(self)
+        function_space = self.V_e if function_space is None else function_space
+
+        density_bcs, gradient_bcs = NeoHookean._define_design_dirichlet_boundaries(
+            self, function_space=function_space
+        )
+
+        try:
+            V_collapsed, _ = function_space.collapse()
+            is_subspace = True
+        except RuntimeError:
+            is_subspace = False
+            V_collapsed = function_space
 
         if self.params.fix_density_h is None:
             return density_bcs, gradient_bcs
@@ -116,10 +127,10 @@ class NeoHookeanTopoOpt(NeoHookean):
                     boundary_markers.add(self.association_table[marker_key])
 
         # Get DOF coordinates (includes ghost DOFs for parallel safety)
-        dof_coords = self.V_e.tabulate_dof_coordinates()
+        dof_coords = V_collapsed.tabulate_dof_coordinates()
 
         # Get number of locally owned DOFs
-        num_owned = self.V_e.dofmap.index_map.size_local
+        num_owned = V_collapsed.dofmap.index_map.size_local
 
         # Collect all boundary dofs (union across markers) and DOFs to fix
         all_boundary_dofs = set()
@@ -135,7 +146,9 @@ class NeoHookeanTopoOpt(NeoHookean):
 
             # Call collectively on all ranks (even if local facets array is empty)
             boundary_dofs = fem.locate_dofs_topological(
-                self.V_e, self.mesh.topology.dim - 1, facets
+                (function_space, V_collapsed) if is_subspace else V_collapsed,
+                self.mesh.topology.dim - 1,
+                facets,
             )
 
             # Accumulate union of boundary DOFs (may include ghost DOFs)
@@ -162,19 +175,29 @@ class NeoHookeanTopoOpt(NeoHookean):
 
         if fixed_value is not None:
             # Create BC for density with fixed value 1.0
-            bc_func_density = fem.Function(self.V_e)
+            bc_func_density = fem.Function(V_collapsed)
             bc_func_density.x.array[:] = fixed_value
             bc_func_density.x.scatter_forward()
             if len(all_dofs_to_fix) > 0:
-                bc_density = fem.dirichletbc(bc_func_density, dofs_array)
+                if is_subspace:
+                    bc_density = fem.dirichletbc(
+                        bc_func_density, dofs_array, function_space
+                    )
+                else:
+                    bc_density = fem.dirichletbc(bc_func_density, dofs_array)
                 density_bcs.append(bc_density)
 
         # Create BC for gradient with fixed value 0.0
-        bc_func_gradient = fem.Function(self.V_e)
+        bc_func_gradient = fem.Function(V_collapsed)
         bc_func_gradient.x.array[:] = 0.0
         bc_func_gradient.x.scatter_forward()
         if len(all_dofs_to_fix) > 0:
-            bc_gradient = fem.dirichletbc(bc_func_gradient, dofs_array)
+            if is_subspace:
+                bc_gradient = fem.dirichletbc(
+                    bc_func_gradient, dofs_array, function_space
+                )
+            else:
+                bc_gradient = fem.dirichletbc(bc_func_gradient, dofs_array)
             gradient_bcs.append(bc_gradient)
 
         # Parallel-safe: sum across all processes

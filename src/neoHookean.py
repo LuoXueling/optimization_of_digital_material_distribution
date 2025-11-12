@@ -534,10 +534,12 @@ class NeoHookean:
 
         return domain_dirichlet_bcs
 
-    def _define_design_dirichlet_boundaries(self):
+    def _define_design_dirichlet_boundaries(self, function_space=None):
         """
         Define dirichlet BCs for self.e and gradient of self.e
         """
+        function_space = self.V_e if function_space is None else function_space
+
         e_bcs = []
         gradient_bcs = []
         fix_design_domain = self.params.fix_design_domain
@@ -552,7 +554,7 @@ class NeoHookean:
             # )
             gradient_bcs.extend(
                 self._define_domain_dirichlet_constraints(
-                    function_space=self.V_e,
+                    function_space=function_space,
                     domain_marker=self.association_table[fix_design_domain],
                     fixed_value=0.0,
                 )
@@ -799,7 +801,7 @@ class NeoHookean:
         problem = LinearProblem(
             lhs_ufl,
             dj_du_ufl,
-            bcs=self.adjoint_bcs,
+            bcs=self.adjoint_bcs + self.gradient_dirichlet_bcs,
             petsc_options={
                 "ksp_type": "preonly",
                 "pc_type": "lu",
