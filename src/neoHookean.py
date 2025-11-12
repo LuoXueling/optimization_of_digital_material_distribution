@@ -273,6 +273,8 @@ class NeoHookean:
                     neumann_func.interpolate(val)
                     self.neumann_bcs.append((marker_id, neumann_func))
                 else:
+                    if isinstance(val, tuple):
+                        val = fem.Constant(self.mesh, ScalarType(val))
                     self.neumann_bcs.append((marker_id, val))
 
             # Update boundaries MeshTags
