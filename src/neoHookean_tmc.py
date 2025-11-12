@@ -30,10 +30,9 @@ class NeoHookeanTMC(NeoHookean):
             self.params.tmc_regularization is None
             or self.params.tmc_regularization == "HuHu"
         ):
-            kappa = self.kappa
             kr = self.params.kr_coef
             hessian = ufl.grad(ufl.grad(self.u))
-            psi_reg = 0.5 * kappa * ufl.exp(-5 * J) * ufl.inner(hessian, hessian)
+            psi_reg = 0.5 * ufl.inner(hessian, hessian)
             regularization = kr * psi_reg
         elif self.params.tmc_regularization == "rotation_angle":
             if self.mesh.topology.dim != 2:
