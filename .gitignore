@@ -1,6 +1,7 @@
 # 
 outputs/
 outputs_test/
+tests/
 references/
 simple_working_code/
 .vscode/

@@ -43,7 +43,8 @@ mesh, cell_tags, boundaries, association_table = import_mesh(
 params.update(
     dotdict(
         mesh=mesh,
-        domain_dict={lambda x: x[1] < 1 - 0.05: "grad_integral_domain"},
+        domain_dict=None,
+        # domain_dict={lambda x: x[1] < 1 - 0.05: "grad_integral_domain"},
         # Mark Dirichlet boundary subdomains and values
         dirichlet_bcs_dict=None,
         neumann_bcs_dict=None,

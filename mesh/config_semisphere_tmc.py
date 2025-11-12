@@ -14,11 +14,12 @@ params = dotdict(
     elem_order=2,
     # Optimization settings
     clip_gradient=0.2,
-    output_per_step=1,
-    maxiter=10000,
-    lr=1,
+    output_per_step=10,
+    maxiter=100000,
+    lr=10,
     fix_design_domain="third_medium",
-    # clip_gradient=0.05,  # clipping acts on lr-scaled gradients
+    fix_density_h=0.04,
+    # clip_gradient=0.01,  # clipping acts on lr-scaled gradients
     # Solver settings
     relative_tol=1e-6,
     snes_options={
@@ -55,6 +56,11 @@ params.update(
     dotdict(
         mesh=mesh,
         domain_dict=None,
+        # domain_dict={
+        #     lambda x: np.logical_and(
+        #         (x[0] - 0.75) ** 2 + x[1] ** 2 <= (0.5 - 0.04) ** 2, x[1] > 0.04
+        #     ): "grad_integral_domain"
+        # },
         # Mark Dirichlet boundary subdomains and values
         dirichlet_bcs_dict=None,
         neumann_bcs_dict=None,
@@ -66,14 +72,14 @@ params.update(
             (association_table["bottom"], (0.0, 0.0)),
             (
                 association_table["top"],
-                (0.0, -0.01),
+                {0: 0.0, 1: (lambda x: (-0.1 / 1.5 * x[0] - 0.36))},
+                # (-0.1 / 1.5 * x[0] - 0.36)
+                # (-0.3 / 1.5 * x[0] - 0.24)
+                # (-0.5 / 1.5 * x[0] - 0.12)
+                # (-0.7 / 1.5 * x[0])
+                # (-0.9 / 1.5 * x[0] + 0.12)
             ),
-            (
-                association_table["third_medium_bottom"],
-                {1: 0},
-            ),
-            # (association_table["left"], {0: 0}),
-            # (association_table["right"], {0: 0}),
-        ],  # a list of tuples (boundary_id, (u_x, u_y, u_z))
+            (association_table["third_medium_bottom"], {1: 0}),
+        ],
     )
 )

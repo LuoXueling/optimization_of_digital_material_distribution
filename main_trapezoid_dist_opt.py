@@ -2,22 +2,33 @@ import ufl
 import dolfinx.fem as fem
 from argparse import ArgumentParser
 from src.neoHookean_topo_opt import NeoHookeanTopoOpt
-from src.steven import StevenNearlyIncompressibleTMCDistOpt
+from src.steven import StevenNearlyIncompressibleDistOpt
 from petsc4py.PETSc import ScalarType
 import os
 import pandas as pd
+import numpy as np
+from src.utils import project
 
 
-class StevenTrapezoidDistOpt(StevenNearlyIncompressibleTMCDistOpt):
-    def _define_design_dirichlet_boundaries(self):
-        return NeoHookeanTopoOpt._define_design_dirichlet_boundaries(
-            self,
-            fixed_value=None,
-            boundary_markers=[self.association_table["trapezoid_top"]],
-        )
+parser = ArgumentParser()
+parser.add_argument("-c", "--config", type=str, default="./mesh/config_trapezoid.py")
+parser.add_argument("--thres", type=int, default=250)
+parser.add_argument("--smooth", type=int, default=30)
 
-    def _objective_function(self):
-        pk1_stress = self.params.psi_coef * self._PK1_stress()
+args = parser.parse_args()
+config_path = args.config
+thres = args.thres
+smooth = args.smooth
+
+
+class StevenTrapezoidDistOpt(StevenNearlyIncompressibleDistOpt):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dx_grad = self.dx
+        # self.dx_grad = self.domain_dx(self.association_table["grad_integral_domain"])
+
+    def _tractions(self):
+        pk1_stress = self._PK1_stress()
         N = ufl.FacetNormal(self.mesh)
         e_x = fem.Constant(self.mesh, ScalarType([1.0, 0.0]))
         e_y = fem.Constant(self.mesh, ScalarType([0.0, 1.0]))
@@ -27,57 +38,44 @@ class StevenTrapezoidDistOpt(StevenNearlyIncompressibleTMCDistOpt):
         ty = -ufl.dot(ufl.dot(pk1_stress, N), e_y) * self.boundary_ds(
             self.association_table["top"]
         )
+        return tx, ty
+
+    def _objective_function(self):
+        tx, ty = self._tractions()
+        tx, ty = self._normalized_scalar_expression(
+            tx, "tx"
+        ), self._normalized_scalar_expression(ty, "ty")
         tx_val = self._assemble_scalar_parallel(tx)
         ty_val = self._assemble_scalar_parallel(ty)
 
-        self.log(
-            f"Traction vertical = {ty_val:.10f} Traction horizontal = {tx_val:.10f}"
+        softplus = lambda x: ufl.conditional(
+            ufl.lt(x, thres * 10),
+            ufl.ln(1 + ufl.exp(x / smooth)) * smooth,
+            x,
         )
+        grad_e = ufl.grad(self.e)
+        grad_norm = (
+            softplus(ufl.dot(grad_e, grad_e) - thres) - softplus(0.0 - thres)
+        ) * self.dx_grad
+        grad_norm_val = self._assemble_scalar_parallel(grad_norm)
 
-        return ty - tx
+        # self.log(f"Traction x = {tx_val:.10f}, Traction y = {ty_val:.10f}")
+        self.log(
+            f"Traction x = {tx_val:.10f}, Traction y = {ty_val:.10f}, grad_norm = {grad_norm_val}"
+        )
+        return ty - tx + grad_norm
 
+    def _get_cell_data(self):
+        cell_data = super()._get_cell_data()
+        scalar_space = fem.functionspace(self.mesh, ("DG", 0))
+        grad_e = ufl.grad(self.e)
+        grad_norm = ufl.dot(grad_e, grad_e)
+        grad_norm_proj = project(grad_norm, scalar_space, "Optimized_projected")
+        cell_data.update({"e_grad_norm": grad_norm_proj})
+        return cell_data
 
-parser = ArgumentParser()
-parser.add_argument(
-    "-c", "--config", type=str, default="./mesh/config_trapezoid_tmc.py"
-)
-
-args = parser.parse_args()
-config_path = args.config
 
 problem = StevenTrapezoidDistOpt(config_path=config_path)
 
-total_step = 40
-for i in range(total_step):
-    problem.log(f"Step: {i+1}/{total_step}")
-    problem.params.dirichlet_bcs = [
-        (
-            problem.association_table["bottom"],
-            fem.Constant(problem.mesh, ScalarType((0.0, 0.0))),
-        ),
-        (
-            problem.association_table["top"],
-            fem.Constant(problem.mesh, ScalarType((0.0, -0.4 * (i + 1) / total_step))),
-        ),
-        (
-            problem.association_table["third_medium_bottom"],
-            {1: 0},
-        ),
-    ]
-
-    problem.load_boundary_conditions()
-    problem.forward()
-    problem.save(time=i)
-    problem.record_traction_dirichlet(step=i)
-    problem.save_records()
-
-problem.vtu_dir = os.path.join(problem.path, "vtu_opt")
-problem.pvd_file = os.path.join(problem.path, "output_opt.pvd")
-problem.record_file = os.path.join(problem.path, "records_opt.csv")
-if problem.params.mesh.comm.rank == 0:
-    os.makedirs(problem.vtu_dir, exist_ok=True)
-problem.timesteps = []
-problem.records = pd.DataFrame()
-problem.records.index.name = "Step"
-
 problem.optimize()
+problem.save_checkpoint()

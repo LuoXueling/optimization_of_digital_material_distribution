@@ -30,6 +30,8 @@ Line(7) = {7, 1};
 //+
 Circle(8) = {4, 3, 2};
 //+
+Physical Curve("semisphere-top", 12) = {8};
+//+
 Physical Curve("top", 9) = {6};
 //+
 Physical Curve("third_medium_bottom", 10) = {1, 4};
