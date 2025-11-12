@@ -76,7 +76,12 @@ class NeoHookean:
             )
         )
 
-        self.B = fem.Constant(self.mesh, ScalarType(self.params.B))
+        self.B = fem.Constant(
+            self.mesh,
+            ScalarType(
+                self.params.B if self.params.B is not None else (0.0,) * self.params.dim
+            ),
+        )
 
         # define function space
         self.V_u = fem.functionspace(

@@ -52,7 +52,7 @@ params.update(
     dotdict(
         mesh=_mesh,
         # Body force
-        B=(0.0, 0.0),  # Body force per unit volume # Modify for 3D
+        B=None,  # Body force per unit volume # Modify for 3D
         # Domain definitions (for subdomain integration)
         # domain_dict: Define domains using geometric marker functions
         #   Format: {lambda x: condition: "domain_name"}
