@@ -21,7 +21,7 @@ import pandas as pd
 
 
 class NeoHookean:
-    def __init__(self, config_path, override_params=None):
+    def __init__(self, config_path=None, override_params=None):
         # Load parameters
         params_updated = importlib.import_module(
             config_path.replace("./", "").strip(".py").replace("/", ".")
@@ -128,6 +128,33 @@ class NeoHookean:
 
         self.records = pd.DataFrame()
         self.records.index.name = "Step"
+
+    def save_checkpoint(self, filename: str | None = None):
+        try:
+            import adios4dolfinx as a4d
+        except Exception as e:
+            raise RuntimeError("adios4dolfinx is required to save checkpoint") from e
+
+        filename = os.path.join(self.path, "state.bp" if filename is None else filename)
+
+        for name, val in sorted(self.__dict__.items()):
+            if isinstance(val, fem.Function):
+                a4d.write_function_on_input_mesh(filename, val, engine="BP4", name=name)
+
+        self.log(f"Checkpoint saved at {filename}")
+
+    def load_functions_from_checkpoint(self, checkpoint_dir):
+        import adios4dolfinx as a4d
+
+        for name, val in sorted(self.__dict__.items()):
+            if isinstance(val, fem.Function):
+                try:
+                    a4d.read_function(checkpoint_dir, val, engine="BP4", name=name)
+                    self.log(f"Loaded function {name} from checkpoint.")
+                except:
+                    self.log(f"Failed to load function {name} from checkpoint.")
+
+        self.log(f"Loaded checkpoint from {checkpoint_dir}")
 
     def _initialize_fields(self):
         self.u = fem.Function(self.V_u, name="displacement")

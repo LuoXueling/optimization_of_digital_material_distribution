@@ -41,7 +41,7 @@ class NeoHookeanIncompressible(NeoHookean):
         self.V_u = self.V_w.sub(0)
         self.V_p = self.V_w.sub(1)
 
-        self.dirichlet_bcs = self._define_dirichlet_boundaries()
+        self.load_boundary_conditions()
 
     def _initialize_fields(self):
         self.w = fem.Function(self.V_w)
