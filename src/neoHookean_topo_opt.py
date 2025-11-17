@@ -82,7 +82,11 @@ class NeoHookeanTopoOpt(NeoHookean):
         return [(self.params.min_density, 1.0)] * len(self.e.x.array)
 
     def _define_design_dirichlet_boundaries(
-        self, fixed_value=1.0, boundary_markers=None, function_space=None
+        self,
+        fixed_value=1.0,
+        boundary_markers=None,
+        function_space=None,
+        fix_boundary_w_bc=True,
     ):
         """Define Dirichlet boundary conditions for density field on boundaries
         where Neumann or Dirichlet BCs are applied to displacement field.
@@ -107,24 +111,30 @@ class NeoHookeanTopoOpt(NeoHookean):
         if self.params.fix_density_h is None:
             return density_bcs, gradient_bcs
 
+        if not fix_boundary_w_bc and boundary_markers is None:
+            self.log(
+                f"Warning: No boundary to fix design. Pass either fix_boundary_w_bc=True or boundary_markers to _define_design_dirichlet_boundaries"
+            )
+
         # Collect all boundary marker IDs from Neumann and Dirichlet BCs
         boundary_markers = set() if boundary_markers is None else set(boundary_markers)
 
-        # Add Neumann BC markers
-        for marker_id, _ in self.neumann_bcs:
-            boundary_markers.add(marker_id)
-
-        # Add Dirichlet BC markers
-        if self.params.dirichlet_bcs is not None:
-            for marker_id, _ in self.params.dirichlet_bcs:
+        if fix_boundary_w_bc:
+            # Add Neumann BC markers
+            for marker_id, _ in self.neumann_bcs:
                 boundary_markers.add(marker_id)
 
-        # Add geometrically-defined Dirichlet BC markers
-        if self.params.dirichlet_bcs_dict is not None:
-            for i in range(len(self.params.dirichlet_bcs_dict)):
-                marker_key = f"Config Dirichlet BC {i}"
-                if marker_key in self.association_table:
-                    boundary_markers.add(self.association_table[marker_key])
+            # Add Dirichlet BC markers
+            if self.params.dirichlet_bcs is not None:
+                for marker_id, _ in self.params.dirichlet_bcs:
+                    boundary_markers.add(marker_id)
+
+            # Add geometrically-defined Dirichlet BC markers
+            if self.params.dirichlet_bcs_dict is not None:
+                for i in range(len(self.params.dirichlet_bcs_dict)):
+                    marker_key = f"Config Dirichlet BC {i}"
+                    if marker_key in self.association_table:
+                        boundary_markers.add(self.association_table[marker_key])
 
         # Get DOF coordinates (includes ghost DOFs for parallel safety)
         dof_coords = V_collapsed.tabulate_dof_coordinates()

@@ -119,6 +119,7 @@ params = dotdict(
     output_per_step=1,
     maxiter=10000,
     lr=5,
+    fix_density_h=0.1,
     # Solver settings
     relative_tol=0.001,
     # Elasticity parameters
