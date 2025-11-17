@@ -44,7 +44,7 @@ class StevenSemisphereDistOpt(StevenNearlyIncompressibleTMCDistOpt):
         )
 
     def _tractions(self):
-        pk1_stress = self.params.psi_coef * self._PK1_stress()
+        pk1_stress = self._PK1_stress()
         N = ufl.FacetNormal(self.mesh)
         e_x = fem.Constant(self.mesh, ScalarType([1.0, 0.0]))
         e_y = fem.Constant(self.mesh, ScalarType([0.0, 1.0]))
