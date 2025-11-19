@@ -16,6 +16,9 @@ class NeoHookeanTMC(NeoHookean):
             self.association_table[self.params.third_medium]
         )
 
+    def _void_indicator(self):
+        return None
+
     def _strain_energy_density_third_medium(self, F=None, C=None, Eps=None):
         return self._strain_energy_density(F=F, C=C, Eps=Eps)
 
@@ -56,12 +59,23 @@ class NeoHookeanTMC(NeoHookean):
         self.psi_third_medium = self.params.psi_coef * psi_third_medium
         self.regularizaiton = regularization
 
+        void_indicator = (
+            self._void_indicator() if hasattr(self, "_void_indicator") else None
+        )
+
         energy = (
             psi * self.dx
             + (self.params.psi_coef * psi_third_medium + regularization)
             * self.third_medium_dx
             - ufl.dot(self.B, self.u) * self.dx
         )
+        if void_indicator is not None:
+            energy = (
+                energy
+                + void_indicator
+                * (self.params.psi_coef * psi_third_medium + regularization)
+                * self.dx
+            )
         # Neumann boundaries
         for i, val in self.neumann_bcs:
             energy -= ufl.dot(val, self.u) * self.boundary_ds(i)

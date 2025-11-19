@@ -291,7 +291,11 @@ class NeoHookeanTopoOpt(NeoHookean):
         if self._optimize_step % self.params.output_per_step == 0:
             self.save(time=self._optimize_step)
         self._optimize_step += 1
-
+        if len(self._loss_history) > 2:
+            self.log(
+                f"Convergence criterion: {(1 - self._loss_history[-1] / self._loss_history[-2])
+                * np.sign(self._loss_history[-1])} < {self.params.relative_tol}"
+            )
         if len(self._loss_history) > 1 and (
             0
             < (1 - self._loss_history[-1] / self._loss_history[-2])
