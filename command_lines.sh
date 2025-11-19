@@ -17,3 +17,7 @@ export OMP_NUM_THREADS=1 && mpirun -n 16 python main_semisphere_dist_opt_tmc.py 
 export OMP_NUM_THREADS=1 && mpirun -n 16 python main_semisphere_dist_opt_tmc.py --case 2 --thres 3000 --smooth 400
 export OMP_NUM_THREADS=1 && mpirun -n 16 python main_semisphere_dist_opt_tmc.py --case 3 --thres 3000 --smooth 400
 export OMP_NUM_THREADS=1 && mpirun -n 16 python main_semisphere_dist_opt_tmc.py --case 4 --thres 3000 --smooth 400
+
+export OMP_NUM_THREADS=1 && mpirun -n 4 python main_compress_ball_dist_opt_tmc.py --case dist
+export OMP_NUM_THREADS=1 && mpirun -n 4 python main_compress_ball_dist_opt_tmc.py --case topo
+
