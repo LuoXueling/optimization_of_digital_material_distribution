@@ -522,7 +522,10 @@ class NeoHookean:
                 (function_space, V_collapsed), self.mesh.topology.dim, cells
             )
             if dofs.size > 0:
-                bc = fem.dirichletbc(bc_func, dofs, function_space)
+                try:
+                    bc = fem.dirichletbc(bc_func, dofs, function_space)
+                except:
+                    bc = fem.dirichletbc(bc_func, dofs)
                 domain_dirichlet_bcs.append(bc)
         else:
             dofs = fem.locate_dofs_topological(

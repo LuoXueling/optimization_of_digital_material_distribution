@@ -70,12 +70,7 @@ class NeoHookeanTMC(NeoHookean):
             - ufl.dot(self.B, self.u) * self.dx
         )
         if void_indicator is not None:
-            energy = (
-                energy
-                + void_indicator
-                * (self.params.psi_coef * psi_third_medium + regularization)
-                * self.dx
-            )
+            energy = energy + void_indicator * regularization * self.dx
         # Neumann boundaries
         for i, val in self.neumann_bcs:
             energy -= ufl.dot(val, self.u) * self.boundary_ds(i)

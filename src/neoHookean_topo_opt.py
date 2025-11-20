@@ -172,12 +172,9 @@ class NeoHookeanTopoOpt(NeoHookean):
         kd_tree = cKDTree(dof_coords)
 
         neighbor_lists = kd_tree.query_ball_point(boundary_coords, r=search_distance)
-        added = 0
         for lst in neighbor_lists:
             for idx in lst:
                 if idx < num_owned:  # keep only locally owned dofs
-                    if idx not in all_dofs_to_fix:
-                        added += 1
                     all_dofs_to_fix.add(idx)
 
         # Create BCs with all collected DOFs (only locally owned)
@@ -189,11 +186,11 @@ class NeoHookeanTopoOpt(NeoHookean):
             bc_func_density.x.array[:] = fixed_value
             bc_func_density.x.scatter_forward()
             if len(all_dofs_to_fix) > 0:
-                if is_subspace:
+                try:
                     bc_density = fem.dirichletbc(
                         bc_func_density, dofs_array, function_space
                     )
-                else:
+                except:
                     bc_density = fem.dirichletbc(bc_func_density, dofs_array)
                 density_bcs.append(bc_density)
 
@@ -202,11 +199,11 @@ class NeoHookeanTopoOpt(NeoHookean):
         bc_func_gradient.x.array[:] = 0.0
         bc_func_gradient.x.scatter_forward()
         if len(all_dofs_to_fix) > 0:
-            if is_subspace:
+            try:
                 bc_gradient = fem.dirichletbc(
                     bc_func_gradient, dofs_array, function_space
                 )
-            else:
+            except:
                 bc_gradient = fem.dirichletbc(bc_func_gradient, dofs_array)
             gradient_bcs.append(bc_gradient)
 
