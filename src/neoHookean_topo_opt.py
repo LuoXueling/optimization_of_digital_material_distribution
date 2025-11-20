@@ -227,10 +227,12 @@ class NeoHookeanTopoOpt(NeoHookean):
         self.log(f"Created density Dirichlet BCs fixing {total_dofs_fixed} DOFs")
         return density_bcs, gradient_bcs
 
+    @property
+    def _degradation(self):
+        return self.density**self.penalty
+
     def _strain_energy_density(self, F=None, C=None, Eps=None):
-        return self.density**self.penalty * super()._strain_energy_density(
-            F=F, C=C, Eps=Eps
-        )
+        return self._degradation * super()._strain_energy_density(F=F, C=C, Eps=Eps)
 
     def _potential_energy(self, psi=None):
         if psi is None:
@@ -363,3 +365,82 @@ class NeoHookeanTopoOpt(NeoHookean):
         )
         cell_data["Gradient_projected"] = grad_projected
         return cell_data
+
+
+class NeoHookeanMappedTopoOpt(NeoHookeanTopoOpt):
+    @property
+    def density(self):
+        raw = self.e if self.n_component == 1 else self.e[self.density_component_id]
+        rho = 1 / (1 + ufl.exp(-raw))
+        return rho
+
+    def _initial_values(self):
+        return np.array([1.0] * len(self.e.x.array))
+
+    def _bounds(self):
+        return [(-100, 100)] * len(self.e.x.array)
+
+    @property
+    def _degradation(self):
+        min_density = fem.Constant(self.mesh, self.params.min_density)
+        return min_density + (1 - min_density) * self.density / (
+            1 + 8 * (1 - self.density)
+        )
+
+    def _strain_energy_density(self, F=None, C=None, Eps=None):
+        return self._degradation * super()._strain_energy_density(F=F, C=C, Eps=Eps)
+
+    def grad(self, x=None):
+        return NeoHookean.grad(self, x)
+
+    def _optimize_callback(self, *args) -> bool:
+        return NeoHookean._optimize_callback(self, *args)
+
+    def _get_point_data(self, main_field=None):
+        return NeoHookean._get_point_data(self, main_field)
+
+    def _get_cell_data(self):
+        cell_data = NeoHookean._get_cell_data(self)
+        scalar_space = fem.functionspace(self.mesh, ("DG", 0))
+
+        density_projected = project(self.density, scalar_space, "Gradient_projected")
+        cell_data["density_projected"] = density_projected
+        return cell_data
+
+    def _define_design_dirichlet_boundaries(self, *args, **kwargs):
+        kwargs.update(dict(fixed_value=10.0))
+        return NeoHookeanTopoOpt._define_design_dirichlet_boundaries(
+            self, *args, **kwargs
+        )
+
+    def _objective_function_value(self):
+        stored_energy = 10 * self._stored_energy()
+        stored_energy_val = self._assemble_scalar_parallel(stored_energy)
+
+        softplus = lambda x: np.log(1 + np.exp(100 * x)) / 100
+        weight = self._weight_diff()
+        weight_val = 50 * softplus(self._assemble_scalar_parallel(weight))
+
+        weight_current = self._assemble_scalar_parallel(
+            self.density / self.area * self.dx
+        )
+
+        self.log(f"Stored energy: {stored_energy_val}, weight constraint: {weight_val}")
+        self.log(f"Real weight: {weight_current} ({self.params.target_volume})")
+        return stored_energy_val + weight_val
+
+    def _grad_j_state(self, j, state, state_test):
+        stored_energy = 10 * self._stored_energy()
+        return ufl.derivative(stored_energy, state, state_test)
+
+    def _grad_j_opt(self, j, opt, opt_test):
+        stored_energy = 10 * self._stored_energy()
+        weight_diff_form = self._weight_diff()
+        softplus_diff = (
+            50
+            * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
+                self._assemble_scalar_parallel(weight_diff_form)
+            )
+            * ufl.derivative(self.density * self.dx, opt, opt_test)
+        )
+        return ufl.derivative(stored_energy, opt, opt_test) + softplus_diff
