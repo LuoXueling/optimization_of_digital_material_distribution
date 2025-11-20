@@ -98,11 +98,11 @@ class NeoHookean:
         # Defined optimized variable (allow multi-component via n_component)
         if self.n_component == 1:
             self.V_e = fem.functionspace(
-                self.mesh, ("Lagrange", self.params.elem_order)
+                self.mesh, ("Lagrange", 1)
             )  # scalar design variable
         else:
             self.V_e = fem.functionspace(
-                self.mesh, ("Lagrange", self.params.elem_order, (self.n_component,))
+                self.mesh, ("Lagrange", 1, (self.n_component,))
             )  # vector-valued design variable
         self.e = fem.Function(self.V_e, name="Optimized")
         self.e.x.array[:] = 1.0
@@ -749,7 +749,9 @@ class NeoHookean:
         self.mesh.comm.Barrier()
         try:
             self.forward()
-        except:
+        except Exception as e:
+            self.log(f"Exception occurred: {e}")
+            self.log("Return inf as loss value")
             self._initialize_fields()
             return np.inf
         loss = self._objective_function_value()

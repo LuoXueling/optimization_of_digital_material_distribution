@@ -13,7 +13,7 @@ params = dotdict(
     # FEM settings
     dim=2,
     q_deg=2,
-    elem_order=1,
+    elem_order=1,  # Only setting order of displacement field. The pressure field and optimized variables are kept first order
     # Geometry settings
     width=4,
     height=1,

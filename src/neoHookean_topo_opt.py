@@ -19,7 +19,7 @@ class NeoHookeanTopoOpt(NeoHookean):
 
     def _init_topo_opt(self):
         # Defined optimized variable
-        V_scalar = fem.functionspace(self.mesh, ("Lagrange", self.params.elem_order))
+        V_scalar = fem.functionspace(self.mesh, ("Lagrange", 1))
         self.filtered_gradient = fem.Function(V_scalar, name="Filtered gradient")
         # Initialize optimization related variables
         self._initial_objective_values = {}
