@@ -95,10 +95,15 @@ class NeoHookean:
             self.V_u, name="displacement"
         )  # fields from previous iteration
 
-        # Defined optimized variable
-        self.V_e = fem.functionspace(
-            self.mesh, ("Lagrange", self.params.elem_order)
-        )  # For the optimized variable
+        # Defined optimized variable (allow multi-component via n_component)
+        if self.n_component == 1:
+            self.V_e = fem.functionspace(
+                self.mesh, ("Lagrange", self.params.elem_order)
+            )  # scalar design variable
+        else:
+            self.V_e = fem.functionspace(
+                self.mesh, ("Lagrange", self.params.elem_order, (self.n_component,))
+            )  # vector-valued design variable
         self.e = fem.Function(self.V_e, name="Optimized")
         self.e.x.array[:] = 1.0
         self.gradient = fem.Function(self.V_e, name="Gradient")
@@ -521,7 +526,7 @@ class NeoHookean:
             dofs = fem.locate_dofs_topological(
                 (function_space, V_collapsed), self.mesh.topology.dim, cells
             )
-            if dofs.size > 0:
+            if len(cells) > 0:
                 try:
                     bc = fem.dirichletbc(bc_func, dofs, function_space)
                 except:
@@ -531,7 +536,7 @@ class NeoHookean:
             dofs = fem.locate_dofs_topological(
                 function_space, self.mesh.topology.dim, cells
             )
-            if dofs.size > 0:
+            if len(cells) > 0:
                 bc = fem.dirichletbc(bc_func, dofs)
                 domain_dirichlet_bcs.append(bc)
 
@@ -804,7 +809,7 @@ class NeoHookean:
         problem = LinearProblem(
             lhs_ufl,
             dj_du_ufl,
-            bcs=self.adjoint_bcs + self.gradient_dirichlet_bcs,
+            bcs=self.adjoint_bcs,
             petsc_options={
                 "ksp_type": "preonly",
                 "pc_type": "lu",
@@ -899,6 +904,10 @@ class NeoHookean:
             if self.params.dim == 2
             else x
         )
+
+    @property
+    def n_component(self) -> int:
+        return 1
 
     @property
     def mu(self):
@@ -1073,8 +1082,14 @@ class NeoHookean:
         }
 
         if self.optimized:
-            e_projected = project(self.e, scalar_space, "Optimized_projected")
-            grad_projected = project(self.gradient, scalar_space, "Gradient_projected")
+            bs = self.V_e.dofmap.bs
+            space = (
+                fem.functionspace(self.mesh, ("DG", 0, (bs,)))
+                if bs > 1
+                else scalar_space
+            )
+            e_projected = project(self.e, space, "Optimized_projected")
+            grad_projected = project(self.gradient, space, "Gradient_projected")
             cell_data.update(
                 {
                     "Optimized_projected": e_projected,

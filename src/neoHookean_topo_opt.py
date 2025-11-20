@@ -9,6 +9,7 @@ import os
 from src.utils import project
 from scipy.spatial import cKDTree
 from petsc4py import PETSc
+from petsc4py.PETSc import ScalarType
 
 
 class NeoHookeanTopoOpt(NeoHookean):
@@ -18,11 +19,19 @@ class NeoHookeanTopoOpt(NeoHookean):
 
     def _init_topo_opt(self):
         # Defined optimized variable
-        self.filtered_gradient = fem.Function(self.V_e, name="Filtered gradient")
-
+        V_scalar = fem.functionspace(self.mesh, ("Lagrange", self.params.elem_order))
+        self.filtered_gradient = fem.Function(V_scalar, name="Filtered gradient")
         # Initialize optimization related variables
         self._initial_objective_values = {}
         self.penalty = self.params.init_penalty
+
+    @property
+    def density(self):
+        return self.e if self.n_component == 1 else self.e[self.density_component_id]
+
+    @property
+    def density_component_id(self):
+        return 0
 
     def _normalized_scalar_expression(self, expression, name):
         if name not in self._initial_objective_values.keys():
@@ -42,7 +51,7 @@ class NeoHookeanTopoOpt(NeoHookean):
 
     def _weight_diff(self):
         return self._normalized_scalar_expression(
-            (self.e - self.params.target_volume) * self.dx, "weight"
+            (self.density - self.params.target_volume) * self.dx, "weight"
         )
 
     def _objective_function_value(self):
@@ -53,7 +62,9 @@ class NeoHookeanTopoOpt(NeoHookean):
         weight = self._weight_diff()
         weight_val = 50 * softplus(self._assemble_scalar_parallel(weight))
 
-        weight_current = self._assemble_scalar_parallel(self.e / self.area * self.dx)
+        weight_current = self._assemble_scalar_parallel(
+            self.density / self.area * self.dx
+        )
 
         self.log(f"Stored energy: {stored_energy_val}, weight constraint: {weight_val}")
         self.log(f"Real weight: {weight_current} ({self.params.target_volume})")
@@ -71,7 +82,7 @@ class NeoHookeanTopoOpt(NeoHookean):
             * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
                 self._assemble_scalar_parallel(weight_diff_form)
             )
-            * ufl.derivative(self.e * self.dx, opt, opt_test)
+            * ufl.derivative(self.density * self.dx, opt, opt_test)
         )
         return ufl.derivative(stored_energy, opt, opt_test) + softplus_diff
 
@@ -91,18 +102,31 @@ class NeoHookeanTopoOpt(NeoHookean):
         """Define Dirichlet boundary conditions for density field on boundaries
         where Neumann or Dirichlet BCs are applied to displacement field.
         Includes DOFs within num_layers element layers from the boundary.
-
-        Args:
-            num_layers: Number of element layers below the boundary to fix (default=2)
         """
         function_space = self.V_e if function_space is None else function_space
+
+        # If vector-valued, dispatch once per component
+        if function_space.dofmap.bs > 1:
+            e_bcs_all, g_bcs_all = [], []
+            for comp in range(function_space.dofmap.bs):
+                comp_space = function_space.sub(comp)
+                e_bcs, g_bcs = self._define_design_dirichlet_boundaries(
+                    fixed_value=fixed_value,
+                    boundary_markers=boundary_markers,
+                    function_space=comp_space,
+                    fix_boundary_w_bc=fix_boundary_w_bc,
+                )
+                e_bcs_all.extend(e_bcs)
+                g_bcs_all.extend(g_bcs)
+            return e_bcs_all, g_bcs_all
 
         density_bcs, gradient_bcs = NeoHookean._define_design_dirichlet_boundaries(
             self, function_space=function_space
         )
 
         try:
-            V_collapsed, _ = function_space.collapse()
+            V_collapsed, collapse_map = function_space.collapse()
+            collapse_map = np.array(collapse_map, dtype=np.int32)
             is_subspace = True
         except RuntimeError:
             is_subspace = False
@@ -156,9 +180,7 @@ class NeoHookeanTopoOpt(NeoHookean):
 
             # Call collectively on all ranks (even if local facets array is empty)
             boundary_dofs = fem.locate_dofs_topological(
-                (function_space, V_collapsed) if is_subspace else V_collapsed,
-                self.mesh.topology.dim - 1,
-                facets,
+                V_collapsed, self.mesh.topology.dim - 1, facets
             )
 
             # Accumulate union of boundary DOFs (may include ghost DOFs)
@@ -179,32 +201,25 @@ class NeoHookeanTopoOpt(NeoHookean):
 
         # Create BCs with all collected DOFs (only locally owned)
         dofs_array = np.array(list(all_dofs_to_fix), dtype=np.int32)
+        dofs_array_parent = collapse_map[dofs_array] if is_subspace else dofs_array
 
         if fixed_value is not None:
             # Create BC for density with fixed value 1.0
-            bc_func_density = fem.Function(V_collapsed)
-            bc_func_density.x.array[:] = fixed_value
-            bc_func_density.x.scatter_forward()
             if len(all_dofs_to_fix) > 0:
-                try:
-                    bc_density = fem.dirichletbc(
-                        bc_func_density, dofs_array, function_space
-                    )
-                except:
-                    bc_density = fem.dirichletbc(bc_func_density, dofs_array)
+                bc_density = fem.dirichletbc(
+                    ScalarType(fixed_value),
+                    dofs_array_parent,
+                    function_space if is_subspace else V_collapsed,
+                )
                 density_bcs.append(bc_density)
 
         # Create BC for gradient with fixed value 0.0
-        bc_func_gradient = fem.Function(V_collapsed)
-        bc_func_gradient.x.array[:] = 0.0
-        bc_func_gradient.x.scatter_forward()
         if len(all_dofs_to_fix) > 0:
-            try:
-                bc_gradient = fem.dirichletbc(
-                    bc_func_gradient, dofs_array, function_space
-                )
-            except:
-                bc_gradient = fem.dirichletbc(bc_func_gradient, dofs_array)
+            bc_gradient = fem.dirichletbc(
+                ScalarType(0.0),
+                dofs_array_parent,
+                function_space if is_subspace else V_collapsed,
+            )
             gradient_bcs.append(bc_gradient)
 
         # Parallel-safe: sum across all processes
@@ -213,12 +228,14 @@ class NeoHookeanTopoOpt(NeoHookean):
         return density_bcs, gradient_bcs
 
     def _strain_energy_density(self, F=None, C=None, Eps=None):
-        return self.e**self.penalty * super()._strain_energy_density(F=F, C=C, Eps=Eps)
+        return self.density**self.penalty * super()._strain_energy_density(
+            F=F, C=C, Eps=Eps
+        )
 
     def _potential_energy(self, psi=None):
         if psi is None:
             psi = self._strain_energy_density()
-        energy = psi * self.dx - self.e * ufl.dot(self.B, self.u) * self.dx
+        energy = psi * self.dx - self.density * ufl.dot(self.B, self.u) * self.dx
         # Neumann boundaries
         for i, val in self.neumann_bcs:
             energy -= ufl.dot(val, self.u) * self.boundary_ds(i)
@@ -226,16 +243,27 @@ class NeoHookeanTopoOpt(NeoHookean):
 
     def grad(self, x=None):
         grad = super().grad(x)
+        if self.n_component == 1:
+            V_dens = self.V_e
+            collapse_map = None
+        else:
+            V_dens, collapse_map = self.V_e.sub(self.density_component_id).collapse()
 
         if self.params.gradient_filter:
             # Create temporary function for gradient to access ghost values
-            grad_func = fem.Function(self.V_e)
-            grad_func.x.array[:] = grad
+            grad_func = fem.Function(V_dens)
+            grad_func.x.array[:] = grad if collapse_map is None else grad[collapse_map]
             grad_func.x.scatter_forward()
 
+            dens_func = fem.Function(V_dens)
+            dens_func.x.array[:] = (
+                self.e.x.array if collapse_map is None else self.e.x.array[collapse_map]
+            )
+            dens_func.x.scatter_forward()
+
             # Deal with the gradient of density: filter method (sparse KD-tree approach)
-            coord = self.V_e.tabulate_dof_coordinates()
-            num_owned = self.V_e.dofmap.index_map.size_local
+            coord = V_dens.tabulate_dof_coordinates()
+            num_owned = V_dens.dofmap.index_map.size_local
 
             # Build KD-tree for efficient neighbor search
             tree = cKDTree(coord)
@@ -247,7 +275,7 @@ class NeoHookeanTopoOpt(NeoHookean):
             )
 
             # Compute filtered gradient using sparse approach
-            filtered_grad = copy.deepcopy(grad)
+            filtered_grad = grad_func.x.array[:]
 
             for p in range(num_owned):
                 neighbor_indices = neighbors_list[p]
@@ -263,21 +291,22 @@ class NeoHookeanTopoOpt(NeoHookean):
 
                 # Get gradient and density values at neighbors
                 grads = grad_func.x.array[neighbor_indices]
-                densities = self.e.x.array[neighbor_indices]
+                densities = dens_func.x.array[neighbor_indices]
 
                 # Weighted average
                 numerator = np.sum(weights * densities * grads)
-                denominator = self.e.x.array[p] * np.sum(weights)
+                denominator = dens_func.x.array[p] * np.sum(weights)
 
                 if denominator > 1e-12:
                     filtered_grad[p] = numerator / denominator
-
-            # Clip gradient values
-            # filtered_grad = np.clip(filtered_grad, a_min=-0.2, a_max=0.2)
-            # fem.set_bc(filtered_grad, self.gradient_dirichlet_bcs)
-            grad = filtered_grad
+            if collapse_map is None:
+                grad[:num_owned] = filtered_grad[:num_owned]
+            else:
+                grad[collapse_map[:num_owned]] = filtered_grad[:num_owned]
         else:
-            filtered_grad = copy.deepcopy(grad)
+            filtered_grad = copy.deepcopy(
+                grad if collapse_map is None else grad[collapse_map]
+            )
 
         self.filtered_gradient.x.array[:] = filtered_grad
         self.filtered_gradient.x.scatter_forward()
@@ -307,7 +336,7 @@ class NeoHookeanTopoOpt(NeoHookean):
                 self.params.init_penalty < self.penalty < self.params.max_penalty
             ):
                 gray_level = self._assemble_scalar_parallel(
-                    self.e * (1.0 - self.e) * 4 / self.area * self.dx
+                    self.density * (1.0 - self.density) * 4 / self.area * self.dx
                 )
                 self.penalty = min(
                     self.penalty * (1 + 0.3 ** (1 + gray_level / 2)),

@@ -137,8 +137,9 @@ class NeoHookeanIncompressibleTopoOpt(NeoHookeanTopoOpt, NeoHookeanIncompressibl
         NeoHookeanTopoOpt._init_topo_opt(self)
 
     def _strain_energy_density(self, F=None, C=None, Eps=None):
-        return self.e**self.penalty * NeoHookeanIncompressible._strain_energy_density(
-            self, F=F, C=C, Eps=Eps
+        return (
+            self.density**self.penalty
+            * NeoHookeanIncompressible._strain_energy_density(self, F=F, C=C, Eps=Eps)
         )
 
     def _get_point_data(self, main_field=None):
