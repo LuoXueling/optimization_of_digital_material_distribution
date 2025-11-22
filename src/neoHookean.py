@@ -805,20 +805,21 @@ class NeoHookean:
             l_solve,
         )
 
-        # Solve using LinearProblem
-        from dolfinx.fem.petsc import LinearProblem
+        # Solve using SNES-based linear solver (drop-in for LinearProblem)
+        from src.solvers import solve_linear_problem
 
-        problem = LinearProblem(
+        # solution function for adjoint
+        lagrangian = fem.Function(state_space, name="adjoint")
+
+        solve_linear_problem(
             lhs_ufl,
             dj_du_ufl,
+            lagrangian,
             bcs=self.adjoint_bcs,
-            petsc_options={
-                "ksp_type": "preonly",
-                "pc_type": "lu",
-                "pc_factor_mat_solver_type": "mumps",
-            },
+            linear_solver="mumps",
+            comm=self.mesh.comm,
+            logger=self.log,
         )
-        lagrangian = problem.solve()
 
         # Compute \partial L/\partial param
         v_e = ufl.TestFunction(self.V_e)
@@ -1102,6 +1103,7 @@ class NeoHookean:
         return cell_data
 
     def save(self, main_field=None, time=0):
+        self.log(f"Start saving time {time}")
         point_data = self._get_point_data(main_field)
         cell_data = self._get_cell_data()
 
@@ -1116,6 +1118,7 @@ class NeoHookean:
                 ref_file = os.path.relpath(vtu_filename, self.path)
             self.timesteps.append((time, ref_file))
         write_pvd(self.pvd_file, self.timesteps, comm=self.mesh.comm)
+        self.log(f"Finish saving")
 
     def compute_traction_dirichlet(self, type="PK1"):
         if type == "PK1":

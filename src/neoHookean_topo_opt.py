@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import copy
 import os
 from src.utils import project
+from src.solvers import solve_linear_problem
 from scipy.spatial import cKDTree
 from petsc4py import PETSc
 from petsc4py.PETSc import ScalarType

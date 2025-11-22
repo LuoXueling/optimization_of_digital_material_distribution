@@ -380,62 +380,141 @@ def solve_nonlinear_problem_with_retry(
                 raise
 
 
-def solve_linear_problem(a, L, u, bcs=None, linear_solver="mumps", comm=None):
+def solve_linear_problem(
+    a,
+    L,
+    u,
+    bcs=None,
+    linear_solver="mumps",
+    comm=None,
+    snes_options=None,
+    logger=print,
+    A_cache=None,
+    b_cache=None,
+):
     """
-    Solve a linear variational problem.
+    Solve a linear variational problem using PETSc SNES (ksponly).
 
-    This is a helper function to simplify the common pattern of setting up
-    and solving linear problems in DOLFINx.
-
-    Arguments:
-        a: The bilinear form (UFL form)
-        L: The linear form (UFL form)
-        u: The solution function (fem.Function) - will be updated in place
-        bcs: List of Dirichlet boundary conditions (optional)
-        linear_solver: Linear solver type ("mumps", "superlu_dist", etc.) (default: "mumps")
-        comm: MPI communicator (default: MPI.COMM_WORLD)
-
-    Returns:
-        fem.Function: The solution (same as u, which is modified in place)
-
-    Example:
-        >>> a = ufl.inner(ufl.grad(trial), ufl.grad(test)) * ufl.dx
-        >>> L = ufl.inner(f, test) * ufl.dx
-        >>> u = fem.Function(V)
-        >>> solve_linear_problem(a, L, u, bcs=bcs)
+    This mirrors ``solve_nonlinear_problem`` but with a fixed linear operator,
+    so it can drop-in replace ``dolfinx.fem.petsc.LinearProblem`` while sharing
+    the same assembly logic and boundary-condition handling in parallel.
     """
-    from dolfinx.fem.petsc import LinearProblem
-
     if comm is None:
         comm = MPI.COMM_WORLD
-
     if bcs is None:
         bcs = []
+    if logger is None:
+        logger = lambda *args, **kwargs: None
 
-    # Set up PETSc options for the linear solver
-    petsc_options = {}
+    # Forms
+    a_form = fem.form(a)
+    L_form = fem.form(L)
+
+    # Matrix/vector holders (reuse if provided)
+    A_external = A_cache is not None
+    b_external = b_cache is not None
+    A = A_cache if A_cache is not None else fem.petsc.create_matrix(a_form)
+    b = b_cache if b_cache is not None else fem.petsc.create_vector(L_form)  # RHS
+    r = fem.petsc.create_vector(L_form)  # residual workspace
+
+    # Assemble once (matrix is constant)
+    def assemble_matrix(J_mat):
+        J_mat.zeroEntries()
+        fem.petsc.assemble_matrix(J_mat, a_form, bcs=bcs)
+        J_mat.assemble()
+
+    def assemble_rhs(rhs_vec):
+        with rhs_vec.localForm() as r_loc:
+            r_loc.set(0.0)
+        fem.petsc.assemble_vector(rhs_vec, L_form)
+        fem.petsc.apply_lifting(rhs_vec, [a_form], bcs=[bcs])
+        rhs_vec.ghostUpdate(
+            addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE
+        )
+        for bc in bcs:
+            bc.set(rhs_vec.array_w)
+
+    # Residual: F(x) = A x - b
+    def assemble_residual_callback(snes_solver, x, F_vec):
+        x.ghostUpdate(addv=PETSc.InsertMode.INSERT, mode=PETSc.ScatterMode.FORWARD)
+        x.copy(u.x.petsc_vec)
+        u.x.scatter_forward()
+
+        A.mult(x, F_vec)
+        F_vec.axpy(-1.0, b)
+        F_vec.ghostUpdate(
+            addv=PETSc.InsertMode.INSERT, mode=PETSc.ScatterMode.FORWARD
+        )
+
+    # Jacobian: constant A
+    def assemble_jacobian_callback(snes_solver, x, J_mat, P_mat):
+        x.ghostUpdate(addv=PETSc.InsertMode.INSERT, mode=PETSc.ScatterMode.FORWARD)
+        x.copy(u.x.petsc_vec)
+        u.x.scatter_forward()
+        # Matrix already assembled once; reuse
+        return PETSc.Mat.Structure.SAME_NONZERO_PATTERN
+
+    # SNES setup
+    snes = PETSc.SNES().create(comm)
+    snes.setFunction(assemble_residual_callback, r)
+    snes.setJacobian(assemble_jacobian_callback, A, A)
+
+    # Linear solver options via KSP
+    ksp = snes.getKSP()
     if linear_solver == "mumps":
-        petsc_options = {
-            "ksp_type": "preonly",
-            "pc_type": "lu",
-            "pc_factor_mat_solver_type": "mumps",
-        }
+        ksp.setType("preonly")
+        ksp.getPC().setType("lu")
+        ksp.getPC().setFactorSolverType("mumps")
     elif linear_solver == "superlu_dist":
-        petsc_options = {
-            "ksp_type": "preonly",
-            "pc_type": "lu",
-            "pc_factor_mat_solver_type": "superlu_dist",
-        }
+        ksp.setType("preonly")
+        ksp.getPC().setType("lu")
+        ksp.getPC().setFactorSolverType("superlu_dist")
     elif linear_solver == "gmres":
-        petsc_options = {"ksp_type": "gmres", "pc_type": "ilu"}
+        ksp.setType("gmres")
+        ksp.getPC().setType("ilu")
     elif linear_solver == "cg":
-        petsc_options = {"ksp_type": "cg", "pc_type": "ilu"}
+        ksp.setType("cg")
+        ksp.getPC().setType("ilu")
+    else:
+        ksp.setType(linear_solver)
 
-    # Create and solve the linear problem
-    problem = LinearProblem(a, L, bcs=bcs, petsc_options=petsc_options)
-    u_solution = problem.solve()
+    # SNES options
+    opts = PETSc.Options()
+    if snes_options is None:
+        snes_options = {}
+    snes_type = snes_options.get("snes_type", "ksponly")
+    opts["snes_type"] = snes_type
+    for key, val in snes_options.items():
+        opts[key] = val
+    snes.setFromOptions()
 
-    # Copy solution into u
-    u.x.array[:] = u_solution.x.array[:]
+    # Assemble A and b once before solve
+    assemble_matrix(A)
+    assemble_rhs(b)
+
+    logger(f"Starting SNES linear solve (snes_type={snes_type}, ksp={ksp.getType()})")
+
+    x = u.x.petsc_vec.copy()
+    x.ghostUpdate(addv=PETSc.InsertMode.INSERT, mode=PETSc.ScatterMode.FORWARD)
+    snes.solve(None, x)
+
+    x.copy(u.x.petsc_vec)
+    u.x.scatter_forward()
+
+    reason = snes.getConvergedReason()
+    its = snes.getIterationNumber()
+    if reason <= 0:
+        logger(f"SNES linear solve did not converge (reason {reason})")
+        raise RuntimeError(
+            f"SNES linear solver failed after {its} iterations (reason {reason})"
+        )
+    logger(f"SNES linear solve converged in {its} iterations (reason {reason})")
+
+    snes.destroy()
+    if not A_external:
+        A.destroy()
+    if not b_external:
+        b.destroy()
+    x.destroy()
 
     return u
