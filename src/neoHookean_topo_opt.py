@@ -34,10 +34,12 @@ class NeoHookeanTopoOpt(NeoHookean):
     def density_component_id(self):
         return 0
 
-    def _normalized_scalar_expression(self, expression, name):
+    def _normalized_scalar_expression(self, expression, name, ref_value=None):
         if name not in self._initial_objective_values.keys():
-            self._initial_objective_values[name] = self._assemble_scalar_parallel(
-                expression
+            self._initial_objective_values[name] = (
+                self._assemble_scalar_parallel(expression)
+                if ref_value is None
+                else ref_value
             )
         normalized_scalar = 1 / self._initial_objective_values[name] * expression
         return normalized_scalar
@@ -52,7 +54,9 @@ class NeoHookeanTopoOpt(NeoHookean):
 
     def _weight_diff(self):
         return self._normalized_scalar_expression(
-            (self.density - self.params.target_volume) * self.dx, "weight"
+            (self.density - self.params.target_volume) * self.dx,
+            "weight",
+            ref_value=(1.0 - self.params.target_volume) * self.area,
         )
 
     def _objective_function_value(self):
@@ -61,7 +65,7 @@ class NeoHookeanTopoOpt(NeoHookean):
 
         softplus = lambda x: np.log(1 + np.exp(100 * x)) / 100
         weight = self._weight_diff()
-        weight_val = 50 * softplus(self._assemble_scalar_parallel(weight))
+        weight_val = 5 * softplus(self._assemble_scalar_parallel(weight))
 
         weight_current = self._assemble_scalar_parallel(
             self.density / self.area * self.dx
@@ -79,7 +83,7 @@ class NeoHookeanTopoOpt(NeoHookean):
         stored_energy = self._stored_energy()
         weight_diff_form = self._weight_diff()
         softplus_diff = (
-            50
+            5
             * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
                 self._assemble_scalar_parallel(weight_diff_form)
             )
@@ -325,19 +329,26 @@ class NeoHookeanTopoOpt(NeoHookean):
                 f"Convergence criterion: {(1 - self._loss_history[-1] / self._loss_history[-2])
                 * np.sign(self._loss_history[-1])} < {self.params.relative_tol}"
             )
-        if len(self._loss_history) > 1 and (
-            0
-            < (1 - self._loss_history[-1] / self._loss_history[-2])
-            * np.sign(self._loss_history[-1])
-            < self.params.relative_tol
+        if len(self._loss_history) > 2 and (
+            (
+                0
+                < (1 - self._loss_history[-1] / self._loss_history[-2])
+                * np.sign(self._loss_history[-1])
+                < self.params.relative_tol
+                and 0
+                < (1 - self._loss_history[-2] / self._loss_history[-3])
+                * np.sign(self._loss_history[-2])
+                < self.params.relative_tol
+            )
             or (
                 len(self._stage_loss_history) > 10
                 and self._stage_loss_history[-10] == min(self._stage_loss_history[-10:])
             )
         ):
-            if (self.penalty == self.params.init_penalty) or (
-                self.params.init_penalty < self.penalty < self.params.max_penalty
-            ):
+            if (
+                self.penalty == self.params.init_penalty
+                and self.params.init_penalty != self.params.max_penalty
+            ) or (self.params.init_penalty < self.penalty < self.params.max_penalty):
                 gray_level = self._assemble_scalar_parallel(
                     self.density * (1.0 - self.density) * 4 / self.area * self.dx
                 )
@@ -388,9 +399,6 @@ class NeoHookeanMappedTopoOpt(NeoHookeanTopoOpt):
             1 + 8 * (1 - self.density)
         )
 
-    def _strain_energy_density(self, F=None, C=None, Eps=None):
-        return self._degradation * super()._strain_energy_density(F=F, C=C, Eps=Eps)
-
     def grad(self, x=None):
         return NeoHookean.grad(self, x)
 
@@ -398,7 +406,11 @@ class NeoHookeanMappedTopoOpt(NeoHookeanTopoOpt):
         return NeoHookean._optimize_callback(self, *args)
 
     def _get_point_data(self, main_field=None):
-        return NeoHookean._get_point_data(self, main_field)
+        point_data = NeoHookean._get_point_data(self, main_field)
+        scalar_space = fem.functionspace(self.mesh, ("CG", 1))
+        density_projected = project(self.density, scalar_space, "density_projected")
+        point_data["density_projected"] = density_projected
+        return point_data
 
     def _get_cell_data(self):
         cell_data = NeoHookean._get_cell_data(self)
@@ -413,35 +425,3 @@ class NeoHookeanMappedTopoOpt(NeoHookeanTopoOpt):
         return NeoHookeanTopoOpt._define_design_dirichlet_boundaries(
             self, *args, **kwargs
         )
-
-    def _objective_function_value(self):
-        stored_energy = 10 * self._stored_energy()
-        stored_energy_val = self._assemble_scalar_parallel(stored_energy)
-
-        softplus = lambda x: np.log(1 + np.exp(100 * x)) / 100
-        weight = self._weight_diff()
-        weight_val = 50 * softplus(self._assemble_scalar_parallel(weight))
-
-        weight_current = self._assemble_scalar_parallel(
-            self.density / self.area * self.dx
-        )
-
-        self.log(f"Stored energy: {stored_energy_val}, weight constraint: {weight_val}")
-        self.log(f"Real weight: {weight_current} ({self.params.target_volume})")
-        return stored_energy_val + weight_val
-
-    def _grad_j_state(self, j, state, state_test):
-        stored_energy = 10 * self._stored_energy()
-        return ufl.derivative(stored_energy, state, state_test)
-
-    def _grad_j_opt(self, j, opt, opt_test):
-        stored_energy = 10 * self._stored_energy()
-        weight_diff_form = self._weight_diff()
-        softplus_diff = (
-            50
-            * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
-                self._assemble_scalar_parallel(weight_diff_form)
-            )
-            * ufl.derivative(self.density * self.dx, opt, opt_test)
-        )
-        return ufl.derivative(stored_energy, opt, opt_test) + softplus_diff

@@ -892,10 +892,16 @@ class NeoHookean:
                 * np.sign(self._loss_history[-1])} < {self.params.relative_tol}"
             )
         if len(self._loss_history) > 2 and (
-            0
-            < (1 - self._loss_history[-1] / self._loss_history[-2])
-            * np.sign(self._loss_history[-1])
-            < self.params.relative_tol
+            (
+                0
+                < (1 - self._loss_history[-1] / self._loss_history[-2])
+                * np.sign(self._loss_history[-1])
+                < self.params.relative_tol
+                and 0
+                < (1 - self._loss_history[-2] / self._loss_history[-3])
+                * np.sign(self._loss_history[-2])
+                < self.params.relative_tol
+            )
             or (
                 len(self._stage_loss_history) > 10
                 and self._stage_loss_history[-10] == min(self._stage_loss_history[-10:])

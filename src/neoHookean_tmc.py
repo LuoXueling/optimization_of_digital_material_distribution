@@ -15,6 +15,7 @@ class NeoHookeanTMC(NeoHookean):
         self.third_medium_dx = self.domain_dx(
             self.association_table[self.params.third_medium]
         )
+        self.area = self._assemble_scalar_parallel(1.0 * self.dx)
 
     def _void_indicator(self):
         return None

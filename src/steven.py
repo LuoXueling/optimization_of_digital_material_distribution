@@ -126,6 +126,7 @@ class StevenIncompressibleTMC(Steven):
         self.third_medium_dx = self.domain_dx(
             self.association_table[self.params.third_medium]
         )
+        self.area = self._assemble_scalar_parallel(1.0 * self.dx)
 
     def load_boundary_conditions(self):
         return NeoHookeanIncompressibleTMC.load_boundary_conditions(self)
@@ -162,6 +163,7 @@ class StevenNearlyIncompressibleTMC(StevenNearlyIncompressible):
         self.third_medium_dx = self.domain_dx(
             self.association_table[self.params.third_medium]
         )
+        self.area = self._assemble_scalar_parallel(1.0 * self.dx)
 
     def _strain_energy_density_third_medium(self, F=None, C=None, Eps=None):
         return self._strain_energy_density(F=F, C=C, Eps=Eps)
@@ -214,6 +216,7 @@ class StevenNearlyIncompressibleTMCDistOpt(StevenNearlyIncompressibleDistOpt):
         self.third_medium_dx = self.domain_dx(
             self.association_table[self.params.third_medium]
         )
+        self.area = self._assemble_scalar_parallel(1.0 * self.dx)
 
     def _strain_energy_density_third_medium(self, F=None, C=None, Eps=None):
         return self._strain_energy_density(F=F, C=C, Eps=Eps)
