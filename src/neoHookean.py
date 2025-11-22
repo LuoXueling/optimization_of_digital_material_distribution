@@ -542,7 +542,9 @@ class NeoHookean:
 
         return domain_dirichlet_bcs
 
-    def _define_design_dirichlet_boundaries(self, function_space=None):
+    def _define_design_dirichlet_boundaries(
+        self, function_space=None, fixed_value=None
+    ):
         """
         Define dirichlet BCs for self.e and gradient of self.e
         """
@@ -553,13 +555,14 @@ class NeoHookean:
         fix_design_domain = self.params.fix_design_domain
         if fix_design_domain is not None:
             # Probably we want the fixed domain unaltered instead of a 1.0
-            # e_bcs.extend(
-            #     self._define_domain_dirichlet_constraints(
-            #         function_space=self.V_e,
-            #         domain_marker=self.association_table[fix_design_domain],
-            #         fixed_value=1.0,
-            #     )
-            # )
+            if fixed_value is not None:
+                e_bcs.extend(
+                    self._define_domain_dirichlet_constraints(
+                        function_space=self.V_e,
+                        domain_marker=self.association_table[fix_design_domain],
+                        fixed_value=fixed_value,
+                    )
+                )
             gradient_bcs.extend(
                 self._define_domain_dirichlet_constraints(
                     function_space=function_space,

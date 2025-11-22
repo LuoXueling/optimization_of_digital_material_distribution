@@ -122,7 +122,7 @@ class NeoHookeanTopoOpt(NeoHookean):
             return e_bcs_all, g_bcs_all
 
         density_bcs, gradient_bcs = NeoHookean._define_design_dirichlet_boundaries(
-            self, function_space=function_space
+            self, function_space=function_space, fixed_value=fixed_value
         )
 
         try:
