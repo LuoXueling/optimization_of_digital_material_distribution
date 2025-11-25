@@ -518,3 +518,51 @@ def solve_linear_problem(
     x.destroy()
 
     return u
+
+
+class BarzilaiBorwein:
+    """
+    Stateful Barzilai-Borwein step length estimator.
+    Call step(x, grad) to get a learning rate; internally stores previous x/grad.
+    """
+
+    def __init__(
+        self, variant="long", fallback_lr=1e-2, smooth_beta=0.95, comm=MPI.COMM_WORLD
+    ):
+        self.variant = variant
+        self.fallback_lr = fallback_lr
+        self.smooth_beta = smooth_beta  # EMA on lr to avoid aggressive jumps
+        self.comm = comm
+        self.prev_x = None
+        self.prev_grad = None
+        self.prev_lr = None
+
+    def step(self, x, grad):
+        if self.prev_x is None or self.prev_grad is None:
+            self.prev_x = x.copy()
+            self.prev_grad = grad.copy()
+            self.prev_lr = self.fallback_lr
+            return self.prev_lr
+
+        s = x - self.prev_x
+        y = grad - self.prev_grad
+        sty = self.comm.allreduce(np.dot(s, y), op=MPI.SUM)
+        if self.variant == "long":
+            denom = sty
+            numer = self.comm.allreduce(np.dot(s, s), op=MPI.SUM)
+        else:  # short
+            denom = self.comm.allreduce(np.dot(y, y), op=MPI.SUM)
+            numer = sty
+        self.prev_x = x.copy()
+        self.prev_grad = grad.copy()
+        if denom <= 1e-16 or numer <= 0:
+            raw_lr = self.fallback_lr
+        else:
+            raw_lr = numer / denom
+        # Exponential smoothing to temper increases
+        smoothed_lr = (
+            self.smooth_beta * (self.prev_lr if self.prev_lr is not None else raw_lr)
+            + (1 - self.smooth_beta) * raw_lr
+        )
+        self.prev_lr = smoothed_lr
+        return smoothed_lr

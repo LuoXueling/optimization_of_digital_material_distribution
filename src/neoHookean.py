@@ -844,9 +844,13 @@ class NeoHookean:
         return grad.copy()
 
     def optimize(self):
-        x0 = self._initial_values()
-        x = x0
-        self._set_optimized_variable(x0)
+        from src.solvers import BarzilaiBorwein
+
+        x = self._initial_values()
+        self._set_optimized_variable(x)
+        optimizer = BarzilaiBorwein(
+            variant="short", fallback_lr=self.params.lr, smooth_beta=0.99
+        )
 
         for i in range(self.params.maxiter):
             print()
@@ -856,12 +860,15 @@ class NeoHookean:
             self._loss_history.append(res)
             self._stage_loss_history.append(res)
             grad = self.grad()
-            fem.set_bc(grad, self.gradient_dirichlet_bcs)
-            x -= np.clip(
-                self.params.lr * grad,
+            lr = optimizer.step(x, grad)
+            self.log(f"Learning rate from Barzilai-Borwein: {lr}")
+            grad = np.clip(
+                lr * grad,
                 a_min=-self.params.clip_gradient,
                 a_max=self.params.clip_gradient,
             )
+            fem.set_bc(grad, self.gradient_dirichlet_bcs)
+            x = x - grad
             for j, bound in zip(range(len(x)), self._bounds()):
                 if bound[0] is not None:
                     x[j] = max(bound[0], x[j])
