@@ -428,9 +428,7 @@ def solve_linear_problem(
             r_loc.set(0.0)
         fem.petsc.assemble_vector(rhs_vec, L_form)
         fem.petsc.apply_lifting(rhs_vec, [a_form], bcs=[bcs])
-        rhs_vec.ghostUpdate(
-            addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE
-        )
+        rhs_vec.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
         for bc in bcs:
             bc.set(rhs_vec.array_w)
 
@@ -442,9 +440,7 @@ def solve_linear_problem(
 
         A.mult(x, F_vec)
         F_vec.axpy(-1.0, b)
-        F_vec.ghostUpdate(
-            addv=PETSc.InsertMode.INSERT, mode=PETSc.ScatterMode.FORWARD
-        )
+        F_vec.ghostUpdate(addv=PETSc.InsertMode.INSERT, mode=PETSc.ScatterMode.FORWARD)
 
     # Jacobian: constant A
     def assemble_jacobian_callback(snes_solver, x, J_mat, P_mat):
