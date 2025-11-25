@@ -112,16 +112,16 @@ params = dotdict(
     # Optimization settings
     target_volume=0.5,
     min_density=0.001,
-    init_penalty=1,
+    init_penalty=4.0,
     max_penalty=4.0,
-    gradient_filter=0.12,
-    clip_gradient=0.2,
+    density_filter=0.01,
+    clip_gradient=0.1,
     output_per_step=1,
     maxiter=10000,
-    lr=5,
+    lr=1,
     fix_density_h=0.1,
     # Solver settings
-    relative_tol=0.001,
+    relative_tol=0.0001,
     # Elasticity parameters
     E=10.0,
     nu=0.3,
@@ -155,9 +155,9 @@ params.update(
 The main script
 
 ```python
-from src.neoHookean_topo_opt import NeoHookeanTopoOpt
+from src.neoHookean_topo_opt import NeoHookeanPDEFilteredTopoOpt
 
-problem = NeoHookeanTopoOpt(config_path="config.py")
+problem = NeoHookeanPDEFilteredTopoOpt(config_path="config.py")
 problem.optimize()
 ```
 
