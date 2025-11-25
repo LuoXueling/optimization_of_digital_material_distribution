@@ -461,16 +461,17 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
         rf = self.params.density_filter
         u = ufl.TrialFunction(self.V_e)
         self._filter_v = ufl.TestFunction(self.V_e)
+        dx = ufl.dx(metadata={"quadrature_degree": self.params.q_deg})
         a = (
-            u * self._filter_v * self.dx
-            + rf**2 * ufl.dot(ufl.grad(u), ufl.grad(self._filter_v)) * self.dx
+            u * self._filter_v * dx
+            + rf**2 * ufl.dot(ufl.grad(u), ufl.grad(self._filter_v)) * dx
         )
         self._filter_a = fem.form(a)
         A = fem.petsc.assemble_matrix(self._filter_a)
         A.assemble()
         self._filter_mat = A
         self._phi_tmp = fem.Function(self.V_e, name="DesignInput")
-        self._filter_rhs_form = fem.form(self._phi_tmp * self._filter_v * self.dx)
+        self._filter_rhs_form = fem.form(self._phi_tmp * self._filter_v * dx)
         self._filter_rhs = fem.petsc.create_vector(self._filter_rhs_form)
         self._filter_solution = fem.Function(self.V_e, name="FilterSolution")
 
@@ -523,7 +524,7 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
 
         beta = 12.0
         eta = 0.5
-        num = ufl.tanh(beta * eta) + ufl.tanh(beta * (self.e - eta))
+        num = ufl.tanh(beta * eta) + ufl.tanh(beta * (self.density - eta))
         den = ufl.tanh(beta * eta) + ufl.tanh(beta * (1.0 - eta))
         proj = num / den
         scalar_space = fem.functionspace(self.mesh, ("CG", 1))
