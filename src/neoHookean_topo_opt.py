@@ -436,21 +436,40 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        # density subspace (handles multi-component)
+        if self.n_component == 1:
+            self.V_dens = self.V_e
+            self._dens_map = None
+        else:
+            self.V_dens, self._dens_map = self.V_e.sub(self.density_component_id).collapse()
+
         # snapshot of raw (unfiltered) density for diagnostics
-        self.raw_density = fem.Function(self.V_e, name="Raw density")
+        self.raw_density = fem.Function(self.V_dens, name="Raw density")
         # filtered density for diagnostics
-        self.rho_filt = fem.Function(self.V_e, name="Filtered density")
+        self.rho_filt = fem.Function(self.V_dens, name="Filtered density")
         self._setup_filter()
 
     @property
     def density(self):
-        return self.e
+        return self.e if self.n_component == 1 else self.e[self.density_component_id]
 
     def _initial_values(self):
-        return np.array([1.0] * len(self.e.x.array))
+        x0 = np.zeros(len(self.e.x.array))
+        if self._dens_map is None:
+            x0[:] = 1.0
+        else:
+            x0[self._dens_map] = 1.0
+        return x0
 
     def _bounds(self):
-        return [(self.params.min_density, 1.0)] * len(self.e.x.array)
+        bnds = [(None, None)] * len(self.e.x.array)
+        if self._dens_map is None:
+            for i in range(len(bnds)):
+                bnds[i] = (self.params.min_density, 1.0)
+        else:
+            for idx in self._dens_map:
+                bnds[idx] = (self.params.min_density, 1.0)
+        return bnds
 
     @property
     def _degradation(self):
@@ -459,8 +478,8 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
     def _setup_filter(self):
         self.log(f"Initialize PDE filter")
         rf = self.params.density_filter
-        u = ufl.TrialFunction(self.V_e)
-        self._filter_v = ufl.TestFunction(self.V_e)
+        u = ufl.TrialFunction(self.V_dens)
+        self._filter_v = ufl.TestFunction(self.V_dens)
         dx = ufl.dx(metadata={"quadrature_degree": self.params.q_deg})
         a = (
             u * self._filter_v * dx
@@ -470,16 +489,19 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
         A = fem.petsc.assemble_matrix(self._filter_a)
         A.assemble()
         self._filter_mat = A
-        self._phi_tmp = fem.Function(self.V_e, name="DesignInput")
+        self._phi_tmp = fem.Function(self.V_dens, name="DesignInput")
         self._filter_rhs_form = fem.form(self._phi_tmp * self._filter_v * dx)
         self._filter_rhs = fem.petsc.create_vector(self._filter_rhs_form)
-        self._filter_solution = fem.Function(self.V_e, name="FilterSolution")
+        self._filter_solution = fem.Function(self.V_dens, name="FilterSolution")
 
     def _filter_density(self, phi_array):
         self.log(f"Applying density filter")
-        n_local = self.V_e.dofmap.index_map.size_local
-        # fill owned entries; keep ghosts zeroed
-        self._phi_tmp.x.array[:n_local] = phi_array[:n_local]
+        if self._dens_map is None:
+            src = phi_array
+        else:
+            src = phi_array[self._dens_map]
+        n_local = self.V_dens.dofmap.index_map.size_local
+        self._phi_tmp.x.array[:n_local] = src[:n_local]
         self._phi_tmp.x.scatter_forward()
         with self._filter_rhs.localForm() as loc:
             loc.set(0.0)
@@ -498,21 +520,27 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
             b_cache=self._filter_rhs,
             logger=self.log,
         )
-        filt_local = self._filter_solution.x.array
-        return np.clip(filt_local, self.params.min_density, 1.0)
+        filt_local = np.clip(self._filter_solution.x.array, self.params.min_density, 1.0)
+        if self._dens_map is None:
+            return filt_local
+        else:
+            full = phi_array.copy()
+            full[self._dens_map] = filt_local
+            return full
 
     def _set_optimized_variable(self, x: np.ndarray):
-        n_local = self.V_e.dofmap.index_map.size_local
-        # store raw (owned dofs)
-        self.raw_density.x.array[:n_local] = x[:n_local]
-        self.raw_density.x.scatter_forward()
-
         filtered = self._filter_density(x)
-        self.rho_filt.x.array[:n_local] = filtered[:n_local]
+        if self._dens_map is None:
+            self.raw_density.x.array[:] = x
+            self.rho_filt.x.array[:] = filtered
+            self.e.x.array[:] = filtered
+        else:
+            self.raw_density.x.array[:] = x[self._dens_map]
+            self.rho_filt.x.array[:] = filtered[self._dens_map]
+            self.e.x.array[:] = x  # keep full vector, but replace density comp
+            self.e.x.array[self._dens_map] = filtered[self._dens_map]
+        self.raw_density.x.scatter_forward()
         self.rho_filt.x.scatter_forward()
-
-        # write back to design variable
-        self.e.x.array[:n_local] = filtered[:n_local]
         self.e.x.scatter_forward()
         self._apply_design_bcs()
         return
