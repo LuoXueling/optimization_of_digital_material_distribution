@@ -112,13 +112,13 @@ params = dotdict(
     # Optimization settings
     target_volume=0.5,
     min_density=0.001,
-    init_penalty=4.0,
-    max_penalty=4.0,
+    init_penalty=6.0,
+    max_penalty=6.0,
     density_filter=0.01,
     clip_gradient=0.1,
     output_per_step=1,
     maxiter=10000,
-    lr=1,
+    lr=100,
     fix_density_h=0.1,
     # Solver settings
     relative_tol=0.0001,
