@@ -558,7 +558,7 @@ class NeoHookean:
             if fixed_value is not None:
                 e_bcs.extend(
                     self._define_domain_dirichlet_constraints(
-                        function_space=self.V_e,
+                        function_space=function_space,
                         domain_marker=self.association_table[fix_design_domain],
                         fixed_value=fixed_value,
                     )
@@ -755,7 +755,6 @@ class NeoHookean:
         except Exception as e:
             self.log(f"Exception occurred: {e}")
             self.log("Return inf as loss value")
-            self._initialize_fields()
             return np.inf
         loss = self._objective_function_value()
         self.log(f"Loss: {loss}")
@@ -848,9 +847,22 @@ class NeoHookean:
 
         x = self._initial_values()
         self._set_optimized_variable(x)
-        optimizer = BarzilaiBorwein(
-            variant="short", fallback_lr=self.params.lr, smooth_beta=0.99
-        )
+        if self.n_component == 1:
+            optimizer = BarzilaiBorwein(
+                variant="short", fallback_lr=self.params.lr, smooth_beta=0.99
+            )
+            collapse_map = None
+        else:
+            optimizer = [
+                BarzilaiBorwein(
+                    variant="short", fallback_lr=self.params.lr, smooth_beta=0.99
+                )
+                for i in range(self.n_component)
+            ]
+            collapse_map = []
+            for i in range(self.n_component):
+                _, m = self.V_e.sub(i).collapse()
+                collapse_map.append(m)
 
         for i in range(self.params.maxiter):
             print()
@@ -860,14 +872,22 @@ class NeoHookean:
             self._loss_history.append(res)
             self._stage_loss_history.append(res)
             grad = self.grad()
-            lr = optimizer.step(x, grad)
+            fem.set_bc(grad, self.gradient_dirichlet_bcs)
+            if self.n_component == 1:
+                lr = optimizer.step(x, grad)
+                grad = lr * grad
+            else:
+                lr = []
+                for opt, m in zip(optimizer, collapse_map):
+                    l = opt.step(x[m], grad[m])
+                    lr.append(l)
+                    grad[m] = l * grad[m]
             self.log(f"Learning rate from Barzilai-Borwein: {lr}")
             grad = np.clip(
-                lr * grad,
+                grad,
                 a_min=-self.params.clip_gradient,
                 a_max=self.params.clip_gradient,
             )
-            fem.set_bc(grad, self.gradient_dirichlet_bcs)
             x = x - grad
             for j, bound in zip(range(len(x)), self._bounds()):
                 if bound[0] is not None:
@@ -898,7 +918,9 @@ class NeoHookean:
                 f"Convergence criterion: {(1 - self._loss_history[-1] / self._loss_history[-2])
                 * np.sign(self._loss_history[-1])} < {self.params.relative_tol}"
             )
-        if len(self._loss_history) > 2 and (
+            if len(self._loss_history) < 20:
+                self.log("Convergence criterion ignored before 20 iterations.")
+        if len(self._loss_history) > 20 and (
             (
                 0
                 < (1 - self._loss_history[-1] / self._loss_history[-2])
@@ -910,8 +932,9 @@ class NeoHookean:
                 < self.params.relative_tol
             )
             or (
-                len(self._stage_loss_history) > 10
-                and self._stage_loss_history[-10] == min(self._stage_loss_history[-10:])
+                len(self._stage_loss_history) > 100
+                and self._stage_loss_history[-100]
+                == min(self._stage_loss_history[-100:])
             )
         ):
             return True
@@ -1053,10 +1076,11 @@ class NeoHookean:
 
     def _get_point_data(self, main_field=None):
         u_field = self.u if main_field is None else main_field
-        point_data = {u_field.name: u_field}
-
-        if self.optimized:
-            point_data.update({self.e.name: self.e, self.gradient.name: self.gradient})
+        point_data = {
+            u_field.name: u_field,
+            self.e.name: self.e,
+            self.gradient.name: self.gradient,
+        }
 
         return point_data
 

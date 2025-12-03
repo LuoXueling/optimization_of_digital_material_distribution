@@ -56,7 +56,7 @@ class NeoHookeanTopoOpt(NeoHookean):
         return self._normalized_scalar_expression(
             (self.density - self.params.target_volume) * self.dx,
             "weight",
-            ref_value=(1.0 - self.params.target_volume) * self.area,
+            # ref_value=(1.0 - self.params.target_volume) * self.area,
         )
 
     def _objective_function_value(self):
@@ -67,12 +67,16 @@ class NeoHookeanTopoOpt(NeoHookean):
         weight = self._weight_diff()
         weight_val = 5 * softplus(self._assemble_scalar_parallel(weight))
 
+        energy_current = self._assemble_scalar_parallel(
+            self._strain_energy_density() * self.dx
+        )
         weight_current = self._assemble_scalar_parallel(
             self.density / self.area * self.dx
         )
 
         self.log(f"Stored energy: {stored_energy_val}, weight constraint: {weight_val}")
-        self.log(f"Real weight: {weight_current} ({self.params.target_volume})")
+        self.log(f"Current energy: {energy_current}")
+        self.log(f"Current weight: {weight_current} ({self.params.target_volume})")
         return stored_energy_val + weight_val
 
     def _grad_j_state(self, j, state, state_test):
@@ -103,6 +107,7 @@ class NeoHookeanTopoOpt(NeoHookean):
         boundary_markers=None,
         function_space=None,
         fix_boundary_w_bc=True,
+        constrained_subspaces=None,
     ):
         """Define Dirichlet boundary conditions for density field on boundaries
         where Neumann or Dirichlet BCs are applied to displacement field.
@@ -113,9 +118,12 @@ class NeoHookeanTopoOpt(NeoHookean):
         # If vector-valued, dispatch once per component
         if function_space.dofmap.bs > 1:
             e_bcs_all, g_bcs_all = [], []
-            for comp in range(function_space.dofmap.bs):
+            if constrained_subspaces is None:
+                constrained_subspaces = range(function_space.dofmap.bs)
+            for comp in constrained_subspaces:
                 comp_space = function_space.sub(comp)
-                e_bcs, g_bcs = self._define_design_dirichlet_boundaries(
+                e_bcs, g_bcs = NeoHookeanTopoOpt._define_design_dirichlet_boundaries(
+                    self,
                     fixed_value=fixed_value,
                     boundary_markers=boundary_markers,
                     function_space=comp_space,
@@ -329,7 +337,9 @@ class NeoHookeanTopoOpt(NeoHookean):
                 f"Convergence criterion: {(1 - self._loss_history[-1] / self._loss_history[-2])
                 * np.sign(self._loss_history[-1])} < {self.params.relative_tol}"
             )
-        if len(self._loss_history) > 2 and (
+            if len(self._loss_history) < 20:
+                self.log("Convergence criterion ignored before 20 iterations.")
+        if len(self._loss_history) > 20 and (
             (
                 0
                 < (1 - self._loss_history[-1] / self._loss_history[-2])
@@ -341,8 +351,9 @@ class NeoHookeanTopoOpt(NeoHookean):
                 < self.params.relative_tol
             )
             or (
-                len(self._stage_loss_history) > 10
-                and self._stage_loss_history[-10] == min(self._stage_loss_history[-10:])
+                len(self._stage_loss_history) > 100
+                and self._stage_loss_history[-100]
+                == min(self._stage_loss_history[-100:])
             )
         ):
             if (
@@ -413,12 +424,7 @@ class NeoHookeanMappedTopoOpt(NeoHookeanTopoOpt):
         return point_data
 
     def _get_cell_data(self):
-        cell_data = NeoHookean._get_cell_data(self)
-        scalar_space = fem.functionspace(self.mesh, ("DG", 0))
-
-        density_projected = project(self.density, scalar_space, "Gradient_projected")
-        cell_data["density_projected"] = density_projected
-        return cell_data
+        return NeoHookean._get_cell_data(self)
 
     def _define_design_dirichlet_boundaries(self, *args, **kwargs):
         kwargs.update(dict(fixed_value=10.0))
@@ -441,7 +447,9 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
             self.V_dens = self.V_e
             self._dens_map = None
         else:
-            self.V_dens, self._dens_map = self.V_e.sub(self.density_component_id).collapse()
+            self.V_dens, self._dens_map = self.V_e.sub(
+                self.density_component_id
+            ).collapse()
 
         # snapshot of raw (unfiltered) density for diagnostics
         self.raw_density = fem.Function(self.V_dens, name="Raw density")
@@ -451,7 +459,15 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
 
     @property
     def density(self):
-        return self.e if self.n_component == 1 else self.e[self.density_component_id]
+        raw_density = (
+            self.e if self.n_component == 1 else self.e[self.density_component_id]
+        )
+        beta = 3.0
+        eta = 0.5
+        num = ufl.tanh(beta * eta) + ufl.tanh(beta * (raw_density - eta))
+        den = ufl.tanh(beta * eta) + ufl.tanh(beta * (1.0 - eta))
+        proj = num / den
+        return proj
 
     def _initial_values(self):
         x0 = np.zeros(len(self.e.x.array))
@@ -494,7 +510,7 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
         self._filter_rhs = fem.petsc.create_vector(self._filter_rhs_form)
         self._filter_solution = fem.Function(self.V_dens, name="FilterSolution")
 
-    def _filter_density(self, phi_array):
+    def _apply_filter(self, phi_array, clip=True):
         self.log(f"Applying density filter")
         if self._dens_map is None:
             src = phi_array
@@ -520,13 +536,29 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
             b_cache=self._filter_rhs,
             logger=self.log,
         )
-        filt_local = np.clip(self._filter_solution.x.array, self.params.min_density, 1.0)
+        filt_local = self._filter_solution.x.array
+        if clip:
+            filt_local = np.clip(filt_local, self.params.min_density, 1.0)
         if self._dens_map is None:
             return filt_local
         else:
             full = phi_array.copy()
             full[self._dens_map] = filt_local
             return full
+
+    def _filter_density(self, phi_array):
+        return self._apply_filter(phi_array, clip=True)
+
+    def grad(self, x=None):
+        """
+        In _set_optimized_variable, we set the filtered field into self.e, and the adjoint solver will get us the gradient for the filtered field.
+        Meanwhile, x that is being updated is always the underlying numerical field, so we are one step from the gradient of x
+        """
+        grad = super().grad(x)
+
+        # Map gradient from filtered field back to unfiltered design via Helmholtz solve (symmetric)
+        grad_unfiltered = self._apply_filter(grad, clip=False)
+        return grad_unfiltered
 
     def _set_optimized_variable(self, x: np.ndarray):
         filtered = self._filter_density(x)
@@ -549,15 +581,6 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
         point_data = NeoHookeanMappedTopoOpt._get_point_data(self, main_field)
         point_data["density_raw"] = self.raw_density
         point_data["density_filtered"] = self.rho_filt
-
-        beta = 12.0
-        eta = 0.5
-        num = ufl.tanh(beta * eta) + ufl.tanh(beta * (self.density - eta))
-        den = ufl.tanh(beta * eta) + ufl.tanh(beta * (1.0 - eta))
-        proj = num / den
-        scalar_space = fem.functionspace(self.mesh, ("CG", 1))
-        density_projected = project(proj, scalar_space, "density_projected")
-        point_data["density_projected"] = density_projected
         return point_data
 
     def _define_design_dirichlet_boundaries(self, *args, **kwargs):
