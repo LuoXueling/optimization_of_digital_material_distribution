@@ -58,8 +58,8 @@ Physical Surface("third_medium", 15) = {1};
 //+
 Physical Surface("main", 16) = {2};
 //+
-Transfinite Curve {7, 8} = 30 Using Progression 1;
+Transfinite Curve {7, 8} = 80 Using Progression 1;
 //+
 Transfinite Curve {6, 5} = 4 Using Progression 1;
 //+
-Transfinite Curve {2, 3} = 30 Using Progression 1;
+Transfinite Curve {2, 3} = 100 Using Progression 1;

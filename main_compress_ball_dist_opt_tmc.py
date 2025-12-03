@@ -1,7 +1,12 @@
 import ufl
 import dolfinx.fem as fem
 from argparse import ArgumentParser
-from src.neoHookean_topo_opt import NeoHookeanTopoOpt
+from src.neoHookean import NeoHookean
+from src.neoHookean_topo_opt import (
+    NeoHookeanTopoOpt,
+    NeoHookeanMappedTopoOpt,
+    NeoHookeanPDEFilteredTopoOpt,
+)
 from src.neoHookean_tmc import NeoHookeanTMC
 from src.steven import (
     StevenNearlyIncompressibleTMCDistOpt,
@@ -13,28 +18,6 @@ import os
 import pandas as pd
 import numpy as np
 from src.utils import project
-
-
-parser = ArgumentParser()
-parser.add_argument(
-    "-c", "--config", type=str, default="./mesh/config_compress_ball_filled_tmc.py"
-)
-parser.add_argument(
-    "-l",
-    "--load",
-    type=str,
-    default="outputs/compress_ball_filled-2025-11-19-12-34-13-ckpt/state.bp",
-)
-parser.add_argument("-e", "--case", type=str, default="dist")
-parser.add_argument("--thres", type=int, default=3000)
-parser.add_argument("--smooth", type=int, default=400)
-
-args = parser.parse_args()
-config_path = args.config
-ckpt = args.load
-case = args.case
-thres = args.thres
-smooth = args.smooth
 
 
 class StevenCompressBallDistOpt(StevenNearlyIncompressibleTMCDistOpt):
@@ -185,14 +168,14 @@ class StevenCompressBallDistOpt(StevenNearlyIncompressibleTMCDistOpt):
 #         return StevenCompressBallDistOpt._define_design_dirichlet_boundaries(self)
 
 
-class StevenCompressBallTopoOpt(NeoHookeanTopoOpt):
+class StevenCompressBallPDEFilteredTopoOpt(NeoHookeanPDEFilteredTopoOpt):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.dx = self.domain_dx(self.association_table[self.params.main_medium])
         self.third_medium_dx = self.domain_dx(
             self.association_table[self.params.third_medium]
         )
-        self.main_area = self._assemble_scalar_parallel(1.0 * self.dx)
+        self.area = self._assemble_scalar_parallel(1.0 * self.dx)
 
         self.ds_circle = self._define_inner_surface_measure(
             boundary_names=[
@@ -207,8 +190,8 @@ class StevenCompressBallTopoOpt(NeoHookeanTopoOpt):
             self, boundary_names=boundary_names, main_obj=main_obj
         )
 
-    def _strain_energy_density_third_medium(self, F=None, C=None, Eps=None):
-        return self._strain_energy_density(F=F, C=C, Eps=Eps)
+    def _strain_energy_density_third_medium(self, *args, **kwargs):
+        return StevenNearlyIncompressible._strain_energy_density(self, *args, **kwargs)
 
     def _get_c(self):
         return self.params.c
@@ -229,48 +212,86 @@ class StevenCompressBallTopoOpt(NeoHookeanTopoOpt):
         kappa = E / (3 * (1 - 2 * self.params.nu))
         return kappa
 
+    @property
+    def density(self):
+        raw_density = (
+            self.e if self.n_component == 1 else self.e[self.density_component_id]
+        )
+        beta = 6.0
+        eta = 0.5
+        num = ufl.tanh(beta * eta) + ufl.tanh(beta * (raw_density - eta))
+        den = ufl.tanh(beta * eta) + ufl.tanh(beta * (1.0 - eta))
+        proj = num / den
+        return proj
+
+    @property
+    def _degradation(self):
+        return ufl.conditional(
+            self.density**self.penalty < 5e-2, 5e-2, self.density**self.penalty
+        )
+
     def _void_indicator(self):
-        return 1 / (1 + ufl.exp(500 * (self.e - 0.01)))
+        return 1 / (1 + ufl.exp(20 * (self._degradation - 0.2)))
 
     def _potential_energy(self, psi=None):
         return (
             NeoHookeanTMC._potential_energy(self, psi)
-            + (1 - self.e) * ufl.dot(self.B, self.u) * self.dx
+            + (1 - self.density) * ufl.dot(self.B, self.u) * self.dx
         )
 
     def _strain_energy_density(self, *args, **kwargs):
-        return self.e**self.penalty * StevenNearlyIncompressible._strain_energy_density(
+        return self._degradation * StevenNearlyIncompressible._strain_energy_density(
             self, *args, **kwargs
         )
 
-    def _define_design_dirichlet_boundaries(self):
-        return NeoHookeanTopoOpt._define_design_dirichlet_boundaries(
-            self,
-            fixed_value=None,
-            boundary_markers=[
-                self.association_table["outer_circle_top"],
-                self.association_table["outer_circle_left"],
-            ],
-            fix_boundary_w_bc=False,
+    # def _set_optimized_variable(self, x: np.ndarray):
+    #     raise NotImplementedError()
+
+    def _define_design_dirichlet_boundaries(self, *args, **kwargs):
+        kwargs.update(
+            dict(
+                fixed_value=1.0,
+                boundary_markers=[
+                    self.association_table["outer_circle_top"],
+                    self.association_table["outer_circle_left"],
+                ],
+                fix_boundary_w_bc=False,
+            )
+        )
+        return NeoHookeanPDEFilteredTopoOpt._define_design_dirichlet_boundaries(
+            self, *args, **kwargs
         )
 
     def _get_cell_data(self):
         cell_data = NeoHookeanTMC._get_cell_data(self)
-        topo_cell_data = NeoHookeanTopoOpt._get_cell_data(self)
+        topo_cell_data = NeoHookeanPDEFilteredTopoOpt._get_cell_data(self)
         cell_data.update(topo_cell_data)
         return cell_data
 
+    def _get_point_data(self, main_field=None):
+        point_data = super()._get_point_data(main_field)
+
+        # beta = 12.0
+        # eta = 0.5
+        # num = ufl.tanh(beta * eta) + ufl.tanh(beta * (self.density - eta))
+        # den = ufl.tanh(beta * eta) + ufl.tanh(beta * (1.0 - eta))
+        # proj = num / den
+        # scalar_space = fem.functionspace(self.mesh, ("CG", 1))
+        # density_projected = project(proj, scalar_space, "density_projected")
+        # point_data["density_projected"] = density_projected
+        return point_data
+
     def _objective_function_value(self):
         top, left = StevenCompressBallDistOpt._morphology(self)
-        morp = top + left
+        morp = self._normalized_scalar_expression(left, "morp")
         morp_val = self._assemble_scalar_parallel(morp)
 
         softplus = lambda x: np.log(1 + np.exp(100 * x)) / 100
         weight = self._weight_diff()
-        weight_val = 50 * softplus(self._assemble_scalar_parallel(weight))
+        weight_val = 5 * softplus(self._assemble_scalar_parallel(weight))
 
         weight_current = self._assemble_scalar_parallel(
-            self.e / self.main_area * self.dx
+            self.density / self.area * self.dx
         )
 
         self.log(f"Morphology: {morp_val}, weight constraint: {weight_val}")
@@ -279,74 +300,204 @@ class StevenCompressBallTopoOpt(NeoHookeanTopoOpt):
 
     def _grad_j_state(self, j, state, state_test):
         top, left = StevenCompressBallDistOpt._morphology(self)
-        morp = top + left
+        morp = self._normalized_scalar_expression(left, "morp")
         return ufl.derivative(morp, state, state_test)  # Should be nothing left
 
     def _grad_j_opt(self, j, opt, opt_test):
         top, left = StevenCompressBallDistOpt._morphology(self)
-        morp = top + left
+        morp = self._normalized_scalar_expression(left, "morp")
         weight_diff_form = self._weight_diff()
         softplus_diff = (
-            50
+            5
             * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
                 self._assemble_scalar_parallel(weight_diff_form)
             )
-            * ufl.derivative(self.e * self.dx, opt, opt_test)
+            * ufl.derivative(self.density * self.dx, opt, opt_test)
         )
         return ufl.derivative(morp, opt, opt_test) + softplus_diff
 
 
-problem = {"dist": StevenCompressBallDistOpt, "topo": StevenCompressBallTopoOpt}[case](
-    config_path=config_path
-)
+class StevenCompressBallDistPDEFilteredTopoOpt(StevenCompressBallPDEFilteredTopoOpt):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dx_grad = self.domain_dx(self.association_table["main"])
+        self.V_c, self._c_map = self.V_e.sub(self.c_component_id).collapse()
+        x = self._initial_values()
+        self._set_optimized_variable(x)
 
-if ckpt is None:
-    total_step = 50
-    for i in range(total_step):
-        problem.log(f"Step: {i+1}/{total_step}")
-        problem.params.dirichlet_bcs = [
-            (
-                problem.association_table["top"],
+    @property
+    def n_component(self) -> int:
+        return 2
+
+    @property
+    def c_component_id(self):
+        return 1
+
+    def _get_c(self):
+        return self.e[self.c_component_id]
+
+    def _initial_values(self):
+        x0 = super()._initial_values()
+        x0[self._c_map] = self.params.c
+        return x0
+
+    def _bounds(self):
+        bnds = super()._bounds()
+        for idx in self._c_map:
+            bnds[idx] = (0.0, 1.0)
+        return bnds
+
+    def _gradient_norm_c(self):
+        softplus = lambda x: ufl.conditional(
+            ufl.lt(x, thres * 10),
+            ufl.ln(1 + ufl.exp(x / smooth)) * smooth,
+            x,
+        )
+        c = self._get_c()
+        grad_c = ufl.grad(c)
+        grad_norm = (
+            softplus(ufl.dot(grad_c, grad_c) - thres) - softplus(0.0 - thres)
+        ) * self.dx_grad
+        return grad_norm
+
+    def _objective_function_value(self):
+        top, left = StevenCompressBallDistOpt._morphology(self)
+        morp = self._normalized_scalar_expression(left, "morp")
+        morp_val = self._assemble_scalar_parallel(morp)
+
+        softplus = lambda x: np.log(1 + np.exp(100 * x)) / 100
+        weight = self._weight_diff()
+        weight_val = 5 * softplus(self._assemble_scalar_parallel(weight))
+
+        weight_current = self._assemble_scalar_parallel(
+            self.density / self.area * self.dx
+        )
+
+        grad_norm = self._gradient_norm_c()
+        grad_norm_val = self._assemble_scalar_parallel(grad_norm)
+
+        self.log(
+            f"Morphology: {morp_val}, weight constraint: {weight_val}, gradient norm: {grad_norm_val}"
+        )
+        self.log(f"Real weight: {weight_current} ({self.params.target_volume})")
+        return morp_val + weight_val + grad_norm_val
+
+    def _grad_j_state(self, j, state, state_test):
+        top, left = StevenCompressBallDistOpt._morphology(self)
+        morp = self._normalized_scalar_expression(left, "morp")
+        return ufl.derivative(morp, state, state_test)  # Should be nothing left
+
+    def _grad_j_opt(self, j, opt, opt_test):
+        top, left = StevenCompressBallDistOpt._morphology(self)
+        morp = self._normalized_scalar_expression(left, "morp")
+        grad_norm = self._gradient_norm_c()
+        weight_diff_form = self._weight_diff()
+        softplus_diff = (
+            5
+            * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
+                self._assemble_scalar_parallel(weight_diff_form)
+            )
+            * ufl.derivative(self.density * self.dx, opt, opt_test)
+        )
+        return ufl.derivative(morp + grad_norm, opt, opt_test) + softplus_diff
+
+    def _define_design_dirichlet_boundaries(self, *args, **kwargs):
+        kwargs.update(
+            dict(
+                fixed_value=1.0,
+                boundary_markers=[
+                    self.association_table["outer_circle_top"],
+                    self.association_table["outer_circle_left"],
+                ],
+                fix_boundary_w_bc=False,
+                constrained_subspaces=[self.density_component_id],
+            )
+        )
+        e_bcs, g_bcs = NeoHookeanTopoOpt._define_design_dirichlet_boundaries(
+            self, *args, **kwargs
+        )
+        e_bcs2, g_bcs2 = NeoHookean._define_design_dirichlet_boundaries(
+            self, function_space=self.V_e.sub(self.c_component_id), fixed_value=None
+        )
+        e_bcs.extend(e_bcs2)
+        g_bcs.extend(g_bcs2)
+        return e_bcs, g_bcs
+
+
+if __name__ == "__main__":
+    parser = ArgumentParser()
+    parser.add_argument(
+        "-c", "--config", type=str, default="./mesh/config_compress_ball_filled_tmc.py"
+    )
+    parser.add_argument(
+        "-l",
+        "--load",
+        type=str,
+        default=None,
+    )
+    parser.add_argument("-e", "--case", type=str, default="topo-dist")
+    parser.add_argument("--thres", type=int, default=3000)
+    parser.add_argument("--smooth", type=int, default=400)
+
+    args = parser.parse_args()
+    config_path = args.config
+    ckpt = args.load
+    case = args.case
+    thres = args.thres
+    smooth = args.smooth
+
+    problem = {
+        "dist": StevenCompressBallDistOpt,
+        "topo-pde": StevenCompressBallPDEFilteredTopoOpt,
+        "topo-dist": StevenCompressBallDistPDEFilteredTopoOpt,
+        # "dist-topo": StevenCompressBallDistPDEFilteredTopoOpt,
+    }[case](config_path=config_path)
+
+    if ckpt is None:
+        total_step = 50
+        for i in range(total_step):
+            problem.log(f"Step: {i+1}/{total_step}")
+            problem.params.dirichlet_bcs = [
                 (
-                    0.0,
-                    -(0.75 - 2 * np.pi * 0.35 * np.sqrt(2) / 8 - 0.05)
-                    * (i + 1)
-                    / total_step,
+                    problem.association_table["top"],
+                    (
+                        0.0,
+                        -(0.75 - 0.35 - 0.08) * (i + 1) / total_step,
+                    ),
                 ),
-            ),
+                (problem.association_table["bottom"], {1: 0}),
+                (problem.association_table["right"], {0: 0}),
+            ]
+
+            problem.load_boundary_conditions()
+            problem.forward()
+            problem.save(time=i)
+            problem.record_traction_dirichlet(step=i)
+            problem.save_records()
+
+        problem.save_checkpoint()
+    else:
+        problem.params.dirichlet_bcs = [
             (problem.association_table["bottom"], {1: 0}),
             (problem.association_table["right"], {0: 0}),
+            (
+                problem.association_table["top"],
+                (0.0, -(0.75 - 0.35 - 0.08)),
+            ),
         ]
-
         problem.load_boundary_conditions()
+        problem.load_functions_from_checkpoint(ckpt)
         problem.forward()
-        problem.save(time=i)
-        problem.record_traction_dirichlet(step=i)
-        problem.save_records()
+        problem.save(time=0)
 
-    problem.save_checkpoint()
-else:
-    problem.params.dirichlet_bcs = [
-        (problem.association_table["bottom"], {1: 0}),
-        (problem.association_table["right"], {0: 0}),
-        (
-            problem.association_table["top"],
-            (0.0, -(0.75 - 2 * np.pi * 0.35 * np.sqrt(2) / 8 - 0.05)),
-        ),
-    ]
-    problem.load_boundary_conditions()
-    problem.load_functions_from_checkpoint(ckpt)
-    problem.forward()
-    problem.save(time=0)
+    problem.vtu_dir = os.path.join(problem.path, "vtu_opt")
+    problem.pvd_file = os.path.join(problem.path, "output_opt.pvd")
+    problem.record_file = os.path.join(problem.path, "records_opt.csv")
+    if problem.params.mesh.comm.rank == 0:
+        os.makedirs(problem.vtu_dir, exist_ok=True)
+    problem.timesteps = []
+    problem.records = pd.DataFrame()
+    problem.records.index.name = "Step"
 
-# problem.vtu_dir = os.path.join(problem.path, "vtu_opt")
-# problem.pvd_file = os.path.join(problem.path, "output_opt.pvd")
-# problem.record_file = os.path.join(problem.path, "records_opt.csv")
-# if problem.params.mesh.comm.rank == 0:
-#     os.makedirs(problem.vtu_dir, exist_ok=True)
-# problem.timesteps = []
-# problem.records = pd.DataFrame()
-# problem.records.index.name = "Step"
-
-# problem.optimize()
-# problem.save_checkpoint()
+    problem.optimize()
+    problem.save_checkpoint(filename="state_opt.bp")

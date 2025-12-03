@@ -13,20 +13,20 @@ params = dotdict(
     q_deg=4,
     elem_order=2,
     # Optimization settings
-    target_volume=0.5,
-    min_density=1e-4,
-    init_penalty=1,
-    max_penalty=4.0,
-    clip_gradient=0.2,
-    gradient_filter=0.05,
+    target_volume=0.3,
+    min_density=0.001,
+    init_penalty=6.0,
+    max_penalty=6.0,
+    clip_gradient=0.02,
+    density_filter=0.02,
     output_per_step=10,
     maxiter=100000,
-    lr=10,
+    lr=1000,
     fix_design_domain="third_medium",
     fix_density_h=0.02,
     # clip_gradient=0.01,  # clipping acts on lr-scaled gradients
     # Solver settings
-    relative_tol=1e-6,
+    relative_tol=1e-5,
     snes_options={
         "snes_type": "newtonls",
         "snes_linesearch_type": "bt",
@@ -43,7 +43,7 @@ params = dotdict(
     c=0.5,
     # TMC settings
     tmc_regularization="rotation_angle",
-    kr_coef=1e-4,
+    kr_coef=1e-3,
     # Increase it for better convergence when seeing that elements are overlapping.
     # Convergence is much different when psi_coef is too high
     psi_coef=1e-6,
