@@ -24,7 +24,7 @@ class NeoHookean:
     def __init__(self, config_path=None, override_params=None):
         # Load parameters
         params_updated = importlib.import_module(
-            config_path.replace("./", "").strip(".py").replace("/", ".")
+            config_path.replace("./", "").removesuffix(".py").replace("/", ".")
         ).params
         self.params = params.copy()
         self.params.update(params_updated)
