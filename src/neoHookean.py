@@ -274,11 +274,20 @@ class NeoHookean:
                     val, (fem.Constant, fem.Expression)
                 ):
                     # Convert function to fem.Function
-                    neumann_func = fem.Function(self.V_u)
-                    neumann_func.interpolate(val)
+                    try:
+                        neumann_func = fem.Function(self.V_u)
+                        neumann_func.interpolate(val)
+                    except:
+                        # If it doesn't work, it's a scalar and represents pressure
+                        neumann_func = fem.Function(
+                            fem.functionspace(
+                                self.mesh, ("Lagrange", self.params.elem_order)
+                            )
+                        )
+                        neumann_func.interpolate(val)
                     self.neumann_bcs.append((marker_id, neumann_func))
                 else:
-                    if isinstance(val, tuple):
+                    if isinstance(val, (tuple, int, float)):
                         val = fem.Constant(self.mesh, ScalarType(val))
                     self.neumann_bcs.append((marker_id, val))
 
@@ -306,15 +315,22 @@ class NeoHookean:
 
         for i, val in self.neumann_bcs:
             forces = []
+            N = ufl.FacetNormal(self.mesh)
             # Check if val is a fem.Function (spatially-varying) or has iterable components
             if isinstance(val, fem.Function):
                 # For fem.Function, compute integral of each component
+                if val.function_space.value_size == 1:
+                    # For scalars, it's pressure load, and we are using reference configuration just for this functionality
+                    val = val * N
                 for comp in range(self.mesh.geometry.dim):
                     global_force = self._assemble_scalar_parallel(
                         val[comp] * self.boundary_ds(i)
                     )
                     forces.append(global_force)
             else:
+                if val.value.size == 1:
+                    # For scalars, it's pressure load, and we are using reference configuration just for this functionality
+                    val = val * N
                 # For Constant or similar, iterate over components
                 for x in val:
                     global_force = self._assemble_scalar_parallel(
@@ -1008,13 +1024,72 @@ class NeoHookean:
         psi = (mu / 2) * (J ** (-2 / 3) * Ic - 3) + (kappa / 2) * (ufl.ln(J)) ** 2
         return psi
 
+    def _body_force_energy(self):
+        if self.params.body_force_applied_on == "deformed":
+            scalar_space = fem.functionspace(self.mesh, ("CG", 1))
+            _, J, _, _ = self.strain_invariant()
+            # J has to be isolated from symbolic differentiation,
+            # otherwise the minimization manipulates surface area to minimize external work
+            J_projected = project(J, scalar_space, "isolated_J")
+            return ufl.dot(self.B, self.u) * J_projected * self.dx
+        elif self.params.body_force_applied_on == "reference":
+            return ufl.dot(self.B, self.u) * self.dx
+        else:
+            raise Exception(
+                f"Forces are applied on either deformed or reference configuration."
+            )
+
+    def _apply_neumann_bcs(self, energy):
+        N = ufl.FacetNormal(self.mesh)
+        if self.params.tractions_applied_on == "deformed":
+            F = self._deformation_gradient()
+            _, J, _, _ = self.strain_invariant()
+            tensor_space = fem.functionspace(
+                self.mesh,
+                ("CG", 1, (self.mesh.geometry.dim, self.mesh.geometry.dim)),
+            )
+            scalar_space = fem.functionspace(self.mesh, ("CG", 1))
+            # J and F have to be isolated from symbolic differentiation,
+            # otherwise the minimization manipulates surface area to minimize external work
+            F = project(F, tensor_space, "isolated_F")
+            J = project(J, scalar_space, "isolated_J")
+            for i, val in self.neumann_bcs:
+                if (
+                    isinstance(val, fem.Constant)
+                    and val.value.size == 1
+                    or isinstance(val, fem.Function)
+                    and val.function_space.value_size == 1
+                ):
+                    energy -= ufl.dot(
+                        val * J * ufl.transpose(ufl.inv(F)) * N, self.u
+                    ) * self.boundary_ds(i)
+                else:
+                    norm_cof_F = J * ufl.transpose(ufl.inv(F)) * N
+                    norm_cof_F = ufl.sqrt(ufl.dot(norm_cof_F, norm_cof_F))
+                    energy -= ufl.dot(val, self.u) * norm_cof_F * self.boundary_ds(i)
+            return energy
+        elif self.params.tractions_applied_on == "reference":
+            for i, val in self.neumann_bcs:
+                if (
+                    isinstance(val, fem.Constant)
+                    and val.value.size == 1
+                    or isinstance(val, fem.Function)
+                    and val.function_space.value_size == 1
+                ):
+                    val = val * N
+                energy -= ufl.dot(val, self.u) * self.boundary_ds(i)
+            return energy
+        else:
+            raise Exception(
+                f"Forces are applied on either deformed or reference configuration."
+            )
+
     def _potential_energy(self, psi=None):
         if psi is None:
             psi = self._strain_energy_density()
-        energy = psi * self.dx - ufl.dot(self.B, self.u) * self.dx
+        energy = psi * self.dx - self._body_force_energy()
         # Neumann boundaries
-        for i, val in self.neumann_bcs:
-            energy -= ufl.dot(val, self.u) * self.boundary_ds(i)
+        energy = self._apply_neumann_bcs(energy)
         return energy
 
     def _deformation_gradient(self):

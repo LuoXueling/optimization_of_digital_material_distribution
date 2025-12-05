@@ -68,13 +68,11 @@ class NeoHookeanTMC(NeoHookean):
             psi * self.dx
             + (self.params.psi_coef * psi_third_medium + regularization)
             * self.third_medium_dx
-            - ufl.dot(self.B, self.u) * self.dx
+            - self._body_force_energy()
         )
         if void_indicator is not None:
             energy = energy + void_indicator * regularization * self.dx
-        # Neumann boundaries
-        for i, val in self.neumann_bcs:
-            energy -= ufl.dot(val, self.u) * self.boundary_ds(i)
+        energy = self._apply_neumann_bcs(energy)
         return energy
 
     def _get_cell_data(self):

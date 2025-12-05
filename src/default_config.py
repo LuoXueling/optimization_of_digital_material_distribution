@@ -51,6 +51,12 @@ _mesh = dmesh.create_rectangle(
 params.update(
     dotdict(
         mesh=_mesh,
+        # Define whether forces are applied on the deformed or reference configuration
+        # Note: If any forces are applied in the deformed configuration, several pseudo loading steps are expected
+        #       because we add to the total potential energy the work of such forces, which is integrated based on
+        #       deformation state at the BEGINNING of the loading step and is not updated during Newton-Raphson.
+        body_force_applied_on="reference",  # Default to gravity force, which doesn't change by the volume change
+        tractions_applied_on="reference",
         # Body force
         B=None,  # Body force per unit volume # Modify for 3D
         # Domain definitions (for subdomain integration)
@@ -74,6 +80,7 @@ params.update(
         dirichlet_bcs_dict=None,
         # Mark Neumann boundary subdomains and values
         # It has a syntax similar to dirichlet_bcs_dict, except that only the Constant and Function is supported
+        # If there is only one component, it is treated as pressure load that follows the surface normal
         neumann_bcs_dict=None,
         # An alternative to define Dirichlet/Neumann boundaries by using msh2xdmf.py
         # This approach can be used together with dirichlet_bcs_dict and neumann_bcs_dict

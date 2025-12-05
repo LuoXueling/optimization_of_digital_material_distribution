@@ -247,14 +247,16 @@ class NeoHookeanTopoOpt(NeoHookean):
     def _strain_energy_density(self, F=None, C=None, Eps=None):
         return self._degradation * super()._strain_energy_density(F=F, C=C, Eps=Eps)
 
-    def _potential_energy(self, psi=None):
-        if psi is None:
-            psi = self._strain_energy_density()
-        energy = psi * self.dx - self.density * ufl.dot(self.B, self.u) * self.dx
-        # Neumann boundaries
-        for i, val in self.neumann_bcs:
-            energy -= ufl.dot(val, self.u) * self.boundary_ds(i)
-        return energy
+    def _body_force_energy(self):
+        if self.params.body_force_applied_on == "deformed":
+            _, J, _, _ = self.strain_invariant()
+            return self.density * ufl.dot(J * self.B, self.u) * self.dx
+        elif self.params.body_force_applied_on == "reference":
+            return self.density * ufl.dot(self.B, self.u) * self.dx
+        else:
+            raise Exception(
+                f"Forces are applied on either deformed or reference configuration."
+            )
 
     def grad(self, x=None):
         grad = super().grad(x)

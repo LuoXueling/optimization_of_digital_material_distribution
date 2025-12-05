@@ -233,11 +233,11 @@ class StevenCompressBallPDEFilteredTopoOpt(NeoHookeanPDEFilteredTopoOpt):
     def _void_indicator(self):
         return 1 / (1 + ufl.exp(20 * (self._degradation - 0.2)))
 
+    def _body_force_energy(self):
+        return NeoHookeanTopoOpt._body_force_energy(self)
+
     def _potential_energy(self, psi=None):
-        return (
-            NeoHookeanTMC._potential_energy(self, psi)
-            + (1 - self.density) * ufl.dot(self.B, self.u) * self.dx
-        )
+        return NeoHookeanTMC._potential_energy(self, psi)
 
     def _strain_energy_density(self, *args, **kwargs):
         return self._degradation * StevenNearlyIncompressible._strain_energy_density(
