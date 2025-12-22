@@ -783,6 +783,10 @@ class NeoHookean:
     def _grad_j_opt(self, j, opt, opt_test):
         return ufl.derivative(j, opt, opt_test)
 
+    @property
+    def gradient_accumulation_steps(self):
+        return 1
+
     def grad(self, x=None):
         self.log("Solving gradient")
         self.mesh.comm.Barrier()
@@ -880,38 +884,47 @@ class NeoHookean:
                 _, m = self.V_e.sub(i).collapse()
                 collapse_map.append(m)
 
+        grad = None
+
         for i in range(self.params.maxiter):
             print()
             self.mesh.comm.Barrier()
             self.log(f"----- Iteration {i} -----")
             res = self.eval(x)
-            self._loss_history.append(res)
-            self._stage_loss_history.append(res)
-            grad = self.grad()
-            fem.set_bc(grad, self.gradient_dirichlet_bcs)
-            if self.n_component == 1:
-                lr = optimizer.step(x, grad)
-                grad = lr * grad
+            _grad = self.grad()
+            fem.set_bc(_grad, self.gradient_dirichlet_bcs)
+            grad = _grad if grad is None else grad + _grad
+            if (self._optimize_step + 1) % self.gradient_accumulation_steps == 0:
+                self._loss_history.append(res)
+                self._stage_loss_history.append(res)
+                if self.n_component == 1:
+                    lr = optimizer.step(x, grad)
+                    grad = lr * grad
+                else:
+                    lr = []
+                    for opt, m in zip(optimizer, collapse_map):
+                        l = opt.step(x[m], grad[m])
+                        lr.append(l)
+                        grad[m] = l * grad[m]
+                self.log(f"Learning rate from Barzilai-Borwein: {lr}")
+                grad = np.clip(
+                    grad,
+                    a_min=-self.params.clip_gradient,
+                    a_max=self.params.clip_gradient,
+                )
+                x = x - grad
+                grad = None
+                for j, bound in zip(range(len(x)), self._bounds()):
+                    if bound[0] is not None:
+                        x[j] = max(bound[0], x[j])
+                    if bound[1] is not None:
+                        x[j] = min(bound[1], x[j])
+                self.mesh.comm.Barrier()
+                self.optimized = True
             else:
-                lr = []
-                for opt, m in zip(optimizer, collapse_map):
-                    l = opt.step(x[m], grad[m])
-                    lr.append(l)
-                    grad[m] = l * grad[m]
-            self.log(f"Learning rate from Barzilai-Borwein: {lr}")
-            grad = np.clip(
-                grad,
-                a_min=-self.params.clip_gradient,
-                a_max=self.params.clip_gradient,
-            )
-            x = x - grad
-            for j, bound in zip(range(len(x)), self._bounds()):
-                if bound[0] is not None:
-                    x[j] = max(bound[0], x[j])
-                if bound[1] is not None:
-                    x[j] = min(bound[1], x[j])
-            self.mesh.comm.Barrier()
-            self.optimized = True
+                self.log(
+                    f"Accumulated gradient {(self._optimize_step + 1) % self.gradient_accumulation_steps}/{self.gradient_accumulation_steps}"
+                )
             terminate = self._optimize_callback()
             if terminate:
                 break
