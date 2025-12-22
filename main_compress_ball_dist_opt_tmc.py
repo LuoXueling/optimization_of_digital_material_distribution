@@ -312,7 +312,7 @@ class StevenCompressBallPDEFilteredTopoOpt(NeoHookeanPDEFilteredTopoOpt):
             * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
                 self._assemble_scalar_parallel(weight_diff_form)
             )
-            * ufl.derivative(self.density * self.dx, opt, opt_test)
+            * ufl.derivative(weight_diff_form, opt, opt_test)
         )
         return ufl.derivative(morp, opt, opt_test) + softplus_diff
 
@@ -397,7 +397,7 @@ class StevenCompressBallDistPDEFilteredTopoOpt(StevenCompressBallPDEFilteredTopo
             * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
                 self._assemble_scalar_parallel(weight_diff_form)
             )
-            * ufl.derivative(self.density * self.dx, opt, opt_test)
+            * ufl.derivative(weight_diff_form, opt, opt_test)
         )
         return ufl.derivative(morp + grad_norm, opt, opt_test) + softplus_diff
 

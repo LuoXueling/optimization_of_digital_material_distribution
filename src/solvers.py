@@ -192,9 +192,11 @@ def solve_nonlinear_problem(
     elif linear_solver == "gmres":
         ksp.setType("gmres")
         ksp.getPC().setType("ilu")
+        raise Exception("gmres not working at this time")
     elif linear_solver == "cg":
         ksp.setType("cg")
         ksp.getPC().setType("ilu")
+        raise Exception("cg not working at this time")
     else:
         ksp.setType(linear_solver)
 
