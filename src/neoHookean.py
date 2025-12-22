@@ -114,19 +114,6 @@ class NeoHookean:
 
         self.load_boundary_conditions()
 
-        # Create domain meshtags for subdomain integration
-        self.domains = self._create_domain_meshtags()
-        self.domain_dx = ufl.dx(
-            metadata={"quadrature_degree": self.params.q_deg},
-            domain=self.mesh,
-            subdomain_data=self.domains,
-        )
-
-        self.e_dirichlet_bcs, self.gradient_dirichlet_bcs = (
-            self._define_design_dirichlet_boundaries()
-        )
-        self._apply_design_bcs()
-
         self.log(f"Association table: {self.association_table}")
 
         # Initialize optimization related variables
@@ -338,6 +325,19 @@ class NeoHookean:
                     )
                     forces.append(global_force)
             self.log(f"Applying Neumann boundary {i}: {forces}")
+
+        # Create domain meshtags for subdomain integration
+        self.domains = self._create_domain_meshtags()
+        self.domain_dx = ufl.dx(
+            metadata={"quadrature_degree": self.params.q_deg},
+            domain=self.mesh,
+            subdomain_data=self.domains,
+        )
+
+        self.e_dirichlet_bcs, self.gradient_dirichlet_bcs = (
+            self._define_design_dirichlet_boundaries()
+        )
+        self._apply_design_bcs()
 
     def _assemble_scalar_parallel(self, expression):
         local_val = fem.assemble_scalar(fem.form(expression))
