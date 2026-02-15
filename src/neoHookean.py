@@ -989,11 +989,15 @@ class NeoHookean:
         return 1
 
     @property
+    def E(self):
+        return self.params.E
+
+    @property
     def mu(self):
         """
         Lame second constant / shear modulus
         """
-        return self.params.E / (2 * (1 + self.params.nu))
+        return self.E / (2 * (1 + self.params.nu))
 
     @property
     def lmbda(self):
@@ -1001,10 +1005,7 @@ class NeoHookean:
         Lame first constant
         """
         return (
-            self.params.E
-            * self.params.nu
-            / (1 + self.params.nu)
-            / (1 - 2 * self.params.nu)
+            self.E * self.params.nu / (1 + self.params.nu) / (1 - 2 * self.params.nu)
         )  # Lame first coefficient
 
     @property
@@ -1012,7 +1013,7 @@ class NeoHookean:
         """
         Bulk modulus
         """
-        return self.params.E / (3 * (1 - 2 * self.params.nu))
+        return self.E / (3 * (1 - 2 * self.params.nu))
 
     def strain_invariant(self, F=None, C=None, Eps=None):
         """
