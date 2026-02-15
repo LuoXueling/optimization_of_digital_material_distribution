@@ -71,6 +71,8 @@ class NeoHookeanTMC(NeoHookean):
             - self._body_force_energy()
         )
         if void_indicator is not None:
+            scalar_space = fem.functionspace(self.mesh, ("CG", 1))
+            void_indicator = project(void_indicator, scalar_space, "void_indicator")
             energy = energy + void_indicator * regularization * self.dx
         energy = self._apply_neumann_bcs(energy)
         return energy
