@@ -495,6 +495,9 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
     def _degradation(self):
         return self.density**self.penalty
 
+    def _optimize_callback(self, *args) -> bool:
+        return NeoHookeanTopoOpt._optimize_callback(self, *args)
+
     def _setup_filter(self):
         self.log(f"Initialize PDE filter")
         rf = self.params.density_filter
