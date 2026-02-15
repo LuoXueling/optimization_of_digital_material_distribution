@@ -952,8 +952,15 @@ class NeoHookean:
             )
             if len(self._loss_history) < 20:
                 self.log("Convergence criterion ignored before 20 iterations.")
-        if len(self._loss_history) > 20 and (
-            (
+            elif (1 - self._loss_history[-1] / self._loss_history[-2]) * np.sign(
+                self._loss_history[-1]
+            ) > (1 - self._loss_history[-2] / self._loss_history[-3]) * np.sign(
+                self._loss_history[-2]
+            ):
+                self.log(
+                    "Loss reduction keeps increasing and convergence criterion is ignored"
+                )
+            elif (
                 0
                 < (1 - self._loss_history[-1] / self._loss_history[-2])
                 * np.sign(self._loss_history[-1])
@@ -962,14 +969,12 @@ class NeoHookean:
                 < (1 - self._loss_history[-2] / self._loss_history[-3])
                 * np.sign(self._loss_history[-2])
                 < self.params.relative_tol
-            )
-            or (
+            ) or (
                 len(self._stage_loss_history) > 100
                 and self._stage_loss_history[-100]
                 == min(self._stage_loss_history[-100:])
-            )
-        ):
-            return True
+            ):
+                return True
         return False
 
     def to_3d(self, x):
