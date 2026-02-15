@@ -343,8 +343,15 @@ class NeoHookeanTopoOpt(NeoHookean):
             )
             if len(self._loss_history) < 20:
                 self.log("Convergence criterion ignored before 20 iterations.")
-        if len(self._loss_history) > 20 and (
-            (
+            elif (1 - self._loss_history[-1] / self._loss_history[-2]) * np.sign(
+                self._loss_history[-1]
+            ) > (1 - self._loss_history[-2] / self._loss_history[-3]) * np.sign(
+                self._loss_history[-2]
+            ):
+                self.log(
+                    "Loss reduction keeps increasing and convergence criterion is ignored"
+                )
+            elif (
                 0
                 < (1 - self._loss_history[-1] / self._loss_history[-2])
                 * np.sign(self._loss_history[-1])
@@ -353,29 +360,29 @@ class NeoHookeanTopoOpt(NeoHookean):
                 < (1 - self._loss_history[-2] / self._loss_history[-3])
                 * np.sign(self._loss_history[-2])
                 < self.params.relative_tol
-            )
-            or (
+            ) or (
                 len(self._stage_loss_history) > 100
                 and self._stage_loss_history[-100]
                 == min(self._stage_loss_history[-100:])
-            )
-        ):
-            if (
-                self.penalty == self.params.init_penalty
-                and self.params.init_penalty != self.params.max_penalty
-            ) or (self.params.init_penalty < self.penalty < self.params.max_penalty):
-                gray_level = self._assemble_scalar_parallel(
-                    self.density * (1.0 - self.density) * 4 / self.area * self.dx
-                )
-                self.penalty = min(
-                    self.penalty * (1 + 0.3 ** (1 + gray_level / 2)),
-                    self.params.max_penalty,
-                )
-                self._stage_loss_history = []
-                self.log(f"Updated penalty to {self.penalty}")
-            elif self.penalty >= self.params.max_penalty:
-                self.log(f"Reached maximum penalty and converged. ")
-                return True
+            ):
+                if (
+                    self.penalty == self.params.init_penalty
+                    and self.params.init_penalty != self.params.max_penalty
+                ) or (
+                    self.params.init_penalty < self.penalty < self.params.max_penalty
+                ):
+                    gray_level = self._assemble_scalar_parallel(
+                        self.density * (1.0 - self.density) * 4 / self.area * self.dx
+                    )
+                    self.penalty = min(
+                        self.penalty * (1 + 0.2 ** (1 + gray_level / 2)),
+                        self.params.max_penalty,
+                    )
+                    self._stage_loss_history = []
+                    self.log(f"Updated penalty to {self.penalty}")
+                elif self.penalty >= self.params.max_penalty:
+                    self.log(f"Reached maximum penalty and converged. ")
+                    return True
         return False
 
     def _get_point_data(self, main_field=None):
