@@ -65,7 +65,9 @@ class NeoHookeanTopoOpt(NeoHookean):
 
         softplus = lambda x: np.log(1 + np.exp(100 * x)) / 100
         weight = self._weight_diff()
-        weight_val = 5 * softplus(self._assemble_scalar_parallel(weight))
+        weight_val = self.params.get("volume_cons_weight", 10.0) * softplus(
+            self._assemble_scalar_parallel(weight)
+        )
 
         energy_current = self._assemble_scalar_parallel(
             self._strain_energy_density() * self.dx
@@ -87,7 +89,7 @@ class NeoHookeanTopoOpt(NeoHookean):
         stored_energy = self._stored_energy()
         weight_diff_form = self._weight_diff()
         softplus_diff = (
-            5
+            self.params.get("volume_cons_weight", 10.0)
             * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
                 self._assemble_scalar_parallel(weight_diff_form)
             )
