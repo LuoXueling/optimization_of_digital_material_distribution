@@ -525,17 +525,38 @@ class BarzilaiBorwein:
     """
 
     def __init__(
-        self, variant="long", fallback_lr=1e-2, smooth_beta=0.95, comm=MPI.COMM_WORLD
+        self,
+        variant="long",
+        fallback_lr=1.0,
+        smooth_beta=0.95,
+        upper_bound_lr=None,
+        lower_bound_lr=None,
+        comm=MPI.COMM_WORLD,
     ):
         self.variant = variant
         self.fallback_lr = fallback_lr
         self.smooth_beta = smooth_beta  # EMA on lr to avoid aggressive jumps
+        self.upper_bound_lr = upper_bound_lr
+        self.lower_bound_lr = lower_bound_lr
+        if self.fallback_lr > 0.0 and (
+            (self.upper_bound_lr is not None and self.fallback_lr > self.upper_bound_lr)
+            or (
+                self.lower_bound_lr is not None
+                and self.fallback_lr < self.lower_bound_lr
+            )
+        ):
+            raise Exception(
+                f"lr ({self.fallback_lr}) is not in the range ({self.lower_bound_lr}, {self.upper_bound_lr})"
+            )
         self.comm = comm
         self.prev_x = None
         self.prev_grad = None
         self.prev_lr = None
 
     def step(self, x, grad):
+        if self.fallback_lr == 0.0:
+            return self.fallback_lr
+
         if self.prev_x is None or self.prev_grad is None:
             self.prev_x = x.copy()
             self.prev_grad = grad.copy()
@@ -558,9 +579,13 @@ class BarzilaiBorwein:
         else:
             raw_lr = numer / denom
         # Exponential smoothing to temper increases
-        smoothed_lr = (
+        smoothed_lr = float(
             self.smooth_beta * (self.prev_lr if self.prev_lr is not None else raw_lr)
             + (1 - self.smooth_beta) * raw_lr
         )
+        if self.lower_bound_lr is not None:
+            smoothed_lr = max(self.lower_bound_lr, smoothed_lr)
+        if self.upper_bound_lr is not None:
+            smoothed_lr = min(self.upper_bound_lr, smoothed_lr)
         self.prev_lr = smoothed_lr
         return smoothed_lr
