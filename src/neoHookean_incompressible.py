@@ -17,6 +17,11 @@ class NeoHookeanIncompressible(NeoHookean):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        self.log(
+            f"Multi-field incompressibility is not working properly right now "
+            f"because of the processing of boundary conditions inputs."
+        )
+
         # define function space (mixed element)
         # P2 vector element for displacement
         el_u = basix.ufl.element(
