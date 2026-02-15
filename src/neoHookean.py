@@ -761,11 +761,12 @@ class NeoHookean:
     def _initial_values(self):
         raise NotImplementedError()
 
-    def eval(self, x):
-        self._set_optimized_variable(x)
-        self.log(
-            f"Taking input: min={self.mesh.comm.allreduce(np.min(self.e.x.array[:]), op=MPI.MIN)}, max={self.mesh.comm.allreduce(np.max(self.e.x.array[:]), op=MPI.MAX)}"
-        )
+    def eval(self, x=None):
+        if x is not None:
+            self._set_optimized_variable(x)
+            self.log(
+                f"Taking input: min={self.mesh.comm.allreduce(np.min(self.e.x.array[:]), op=MPI.MIN)}, max={self.mesh.comm.allreduce(np.max(self.e.x.array[:]), op=MPI.MAX)}"
+            )
         # Solve \partial L/\partial \lambda = 0, i.e. the governing equation it self
         self.log("Solving forward problem")
         self.mesh.comm.Barrier()
@@ -865,11 +866,14 @@ class NeoHookean:
         self.gradient.x.scatter_forward()
         return grad.copy()
 
-    def optimize(self):
+    def optimize(self, warm_start=False):
         from src.solvers import BarzilaiBorwein
 
-        x = self._initial_values()
-        self._set_optimized_variable(x)
+        if not warm_start:
+            x = self._initial_values()
+            self._set_optimized_variable(x)
+        else:
+            x = self.e.x.array[:]
         if self.n_component == 1:
             optimizer = BarzilaiBorwein(
                 variant="short",
@@ -905,7 +909,11 @@ class NeoHookean:
             print()
             self.mesh.comm.Barrier()
             self.log(f"----- Iteration {i} -----")
-            res = self.eval(x)
+            if i == 0 and warm_start:
+                # Don't call _set_optimized_variable in this case.
+                res = self.eval()
+            else:
+                res = self.eval(x)
             _grad = self.grad()
             fem.set_bc(_grad, self.gradient_dirichlet_bcs)
             grad = _grad if grad is None else grad + _grad

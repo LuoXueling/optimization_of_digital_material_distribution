@@ -19,6 +19,8 @@ params = dotdict(
     height=1,
     mesh_size=0.02,
     # Optimization settings
+    # One can also set different learning rates for different components by adding a suffix, such as lr_0, lr_1, etc.
+    # If not set differently, the learning rate for all components are set to lr.
     output_per_step=10,
     maxiter=10000,
     lr=1,
