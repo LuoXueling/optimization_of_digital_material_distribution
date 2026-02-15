@@ -94,6 +94,7 @@ class NeoHookean:
         self.u = fem.Function(
             self.V_u, name="displacement"
         )  # fields from previous iteration
+        # self.residual = fem.Function(self.V_u, name="residual")
 
         # Defined optimized variable (allow multi-component via n_component)
         if self.n_component == 1:
@@ -737,7 +738,9 @@ class NeoHookean:
                 snes_options=self.params.snes_options,
                 num_retries=self.params.num_retries,
             )
+            # self.residual.x.array[:] = fem.assemble_vector(fem.form(F)).array
         except Exception as e:
+            # self.residual.x.array[:] = fem.assemble_vector(fem.form(F)).array
             self.save(time=int(1e6))
             raise e
 
@@ -1168,6 +1171,7 @@ class NeoHookean:
             u_field.name: u_field,
             self.e.name: self.e,
             self.gradient.name: self.gradient,
+            # self.residual.name: self.residual,
         }
 
         return point_data
