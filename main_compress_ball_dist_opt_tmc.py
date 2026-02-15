@@ -288,7 +288,9 @@ class StevenCompressBallPDEFilteredTopoOpt(NeoHookeanPDEFilteredTopoOpt):
 
         softplus = lambda x: np.log(1 + np.exp(100 * x)) / 100
         weight = self._weight_diff()
-        weight_val = 5 * softplus(self._assemble_scalar_parallel(weight))
+        weight_val = self.params.get("volume_cons_weight", 10.0) * softplus(
+            self._assemble_scalar_parallel(weight)
+        )
 
         weight_current = self._assemble_scalar_parallel(
             self.density / self.area * self.dx
@@ -308,7 +310,7 @@ class StevenCompressBallPDEFilteredTopoOpt(NeoHookeanPDEFilteredTopoOpt):
         morp = self._normalized_scalar_expression(left, "morp")
         weight_diff_form = self._weight_diff()
         softplus_diff = (
-            5
+            self.params.get("volume_cons_weight", 10.0)
             * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
                 self._assemble_scalar_parallel(weight_diff_form)
             )
@@ -367,7 +369,9 @@ class StevenCompressBallDistPDEFilteredTopoOpt(StevenCompressBallPDEFilteredTopo
 
         softplus = lambda x: np.log(1 + np.exp(100 * x)) / 100
         weight = self._weight_diff()
-        weight_val = 5 * softplus(self._assemble_scalar_parallel(weight))
+        weight_val = self.params.get("volume_cons_weight", 10.0) * softplus(
+            self._assemble_scalar_parallel(weight)
+        )
 
         weight_current = self._assemble_scalar_parallel(
             self.density / self.area * self.dx
@@ -393,7 +397,7 @@ class StevenCompressBallDistPDEFilteredTopoOpt(StevenCompressBallPDEFilteredTopo
         grad_norm = self._gradient_norm_c()
         weight_diff_form = self._weight_diff()
         softplus_diff = (
-            5
+            self.params.get("volume_cons_weight", 10.0)
             * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
                 self._assemble_scalar_parallel(weight_diff_form)
             )
