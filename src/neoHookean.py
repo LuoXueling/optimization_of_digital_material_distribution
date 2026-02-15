@@ -872,13 +872,25 @@ class NeoHookean:
         self._set_optimized_variable(x)
         if self.n_component == 1:
             optimizer = BarzilaiBorwein(
-                variant="short", fallback_lr=self.params.lr, smooth_beta=0.99
+                variant="short",
+                fallback_lr=self.params.lr,
+                smooth_beta=0.99,
+                upper_bound_lr=self.params.upper_bound_lr,
+                lower_bound_lr=self.params.lower_bound_lr,
             )
             collapse_map = None
         else:
             optimizer = [
                 BarzilaiBorwein(
-                    variant="short", fallback_lr=self.params.lr, smooth_beta=0.99
+                    variant="short",
+                    fallback_lr=(
+                        self.params.lr
+                        if self.params.get(f"lr_{i}", None) is None
+                        else self.params.get(f"lr_{i}", None)
+                    ),
+                    smooth_beta=0.99,
+                    upper_bound_lr=self.params.upper_bound_lr,
+                    lower_bound_lr=self.params.lower_bound_lr,
                 )
                 for i in range(self.n_component)
             ]

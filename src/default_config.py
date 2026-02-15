@@ -22,6 +22,8 @@ params = dotdict(
     output_per_step=10,
     maxiter=10000,
     lr=1,
+    upper_bound_lr=None,
+    lower_bound_lr=None,
     clip_gradient=0.2,  # clipping acts on lr-scaled gradients
     # Solver settings
     relative_tol=0.001,
