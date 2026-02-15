@@ -61,7 +61,7 @@ class NeoHookeanTopoOpt(NeoHookean):
 
     def _objective_function_value(self):
         stored_energy = self._stored_energy()
-        stored_energy_val = self._assemble_scalar_parallel(stored_energy)
+        stored_energy_val = 1 + self._assemble_scalar_parallel(stored_energy)
 
         softplus = lambda x: np.log(1 + np.exp(100 * x)) / 100
         weight = self._weight_diff()
