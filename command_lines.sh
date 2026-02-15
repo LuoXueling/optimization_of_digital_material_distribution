@@ -21,3 +21,5 @@ export OMP_NUM_THREADS=1 && mpirun -n 16 python main_semisphere_dist_opt_tmc.py 
 export OMP_NUM_THREADS=1 && mpirun -n 4 python main_compress_ball_dist_opt_tmc.py --case dist
 export OMP_NUM_THREADS=1 && mpirun -n 4 python main_compress_ball_dist_opt_tmc.py --case topo
 
+
+python main_cantilever_beam.py
