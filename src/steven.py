@@ -19,6 +19,18 @@ class Steven(NeoHookeanIncompressible):
     def _get_c(self):
         return self.params.c
 
+    @property
+    def E(self):
+        c = self._get_c()
+        E = (
+            0.30390594 * c**4
+            - 0.96196938 * c**3
+            + 0.89915784 * c**2
+            + 0.39949939 * c
+            + 0.69701715
+        )
+        return E
+
     def _strain_energy_density_wo_constraint(self):
         c = self._get_c()
 
@@ -193,7 +205,7 @@ class StevenNearlyIncompressibleDistOpt(StevenNearlyIncompressible):
         raise NotImplementedError()
 
     def _initial_values(self):
-        return np.array([0.5] * len(self.e.x.array))
+        return np.array([self.params.c] * len(self.e.x.array))
 
     def _bounds(self):
         return [(0.0, 1.0)] * len(self.e.x.array)
