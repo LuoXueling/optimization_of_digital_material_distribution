@@ -13,15 +13,16 @@ params = dotdict(
     q_deg=4,
     elem_order=2,
     # Optimization settings
-    clip_gradient=0.2,
+    clip_gradient=0.01,
     output_per_step=10,
     maxiter=100000,
+    optimizer="BarzilaiBorwein",
     lr=10,
     fix_design_domain="third_medium",
     fix_density_h=0.04,
     # clip_gradient=0.01,  # clipping acts on lr-scaled gradients
     # Solver settings
-    relative_tol=1e-6,
+    relative_tol=1e-4,
     snes_options={
         "snes_type": "newtonls",
         "snes_linesearch_type": "bt",

@@ -17,14 +17,12 @@ parser.add_argument(
 parser.add_argument("-l", "--load", type=str, default=None)
 parser.add_argument("-e", "--case", type=int, default=1)
 parser.add_argument("--thres", type=int, default=3000)
-parser.add_argument("--smooth", type=int, default=400)
 
 args = parser.parse_args()
 config_path = args.config
 load_ckpt = args.load
 case = args.case
 thres = args.thres
-smooth = args.smooth
 
 
 class StevenSemisphereDistOpt(StevenNearlyIncompressibleTMCDistOpt):
@@ -64,14 +62,16 @@ class StevenSemisphereDistOpt(StevenNearlyIncompressibleTMCDistOpt):
         tx_val = self._assemble_scalar_parallel(tx)
         ty_val = self._assemble_scalar_parallel(ty)
 
+        smooth = thres / 10
         softplus = lambda x: ufl.conditional(
             ufl.lt(x, thres * 10),
             ufl.ln(1 + ufl.exp(x / smooth)) * smooth,
             x,
         )
-        grad_e = ufl.grad(self.e)
+        c = self._get_c()
+        grad_c = ufl.grad(c)
         grad_norm = (
-            softplus(ufl.dot(grad_e, grad_e) - thres) - softplus(0.0 - thres)
+            softplus(ufl.dot(grad_c, grad_c) - thres) - softplus(0.0 - thres)
         ) * self.dx_grad
         grad_norm_val = self._assemble_scalar_parallel(grad_norm)
 
@@ -80,6 +80,9 @@ class StevenSemisphereDistOpt(StevenNearlyIncompressibleTMCDistOpt):
             f"Traction x = {tx_val:.10f}, Traction y = {ty_val:.10f}, grad_norm = {grad_norm_val}"
         )
         return ty - tx + grad_norm
+
+    def _objective_function_value(self):
+        return super()._objective_function_value() + 10
 
     def _get_cell_data(self):
         cell_data = super()._get_cell_data()

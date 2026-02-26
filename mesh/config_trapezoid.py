@@ -13,13 +13,14 @@ params = dotdict(
     q_deg=2,
     elem_order=1,
     # Optimization settings
-    clip_gradient=0.2,
+    clip_gradient=0.01,
     output_per_step=1,
     maxiter=10000,
+    optimizer="BarzilaiBorwein",
     lr=1,
     fix_design_domain="fix_design",
     # Solver settings
-    relative_tol=1e-6,
+    relative_tol=1e-4,
     snes_options={
         "snes_type": "newtonls",
         "snes_linesearch_type": "bt",
@@ -31,7 +32,6 @@ params = dotdict(
         "snes_linesearch_order": 1,
     },
     # Elasticity parameters
-    E=1.3373,
     nu=0.49,
     c=0.5,
 )
