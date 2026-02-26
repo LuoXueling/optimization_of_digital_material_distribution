@@ -23,10 +23,9 @@ params = dotdict(
     max_penalty=6.0,
     gradient_filter=None,
     density_filter=0.01,
-    clip_gradient=0.1,
+    clip_gradient=0.02,
     output_per_step=1,
     maxiter=10000,
-    lr=100,
     fix_density_h=None,
     # fix_design_domain="left_half",
     # Solver settings

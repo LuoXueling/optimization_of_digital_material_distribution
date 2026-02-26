@@ -7,7 +7,7 @@ import dolfinx.io as io
 from dolfinx.la import InsertMode
 import ufl
 from src.default_config import params
-from src.solvers import solve_nonlinear_problem_with_retry
+from src.solvers import solve_nonlinear_problem
 import os
 import importlib
 import shutil
@@ -714,7 +714,7 @@ class NeoHookean:
         self.log(f"Created domain MeshTags with {len(existing_indices)} cells")
         return domains
 
-    def forward(self):
+    def forward(self, save_jacobian=False, external_jacobian=None):
         psi = self._strain_energy_density()
 
         # Total potential energy
@@ -728,7 +728,7 @@ class NeoHookean:
 
         # Solve nonlinear variational problem
         try:
-            solve_nonlinear_problem_with_retry(
+            res = solve_nonlinear_problem(
                 F,
                 self.u,
                 bcs=self.dirichlet_bcs,
@@ -736,8 +736,11 @@ class NeoHookean:
                 comm=self.mesh.comm,
                 logger=self.log,
                 snes_options=self.params.snes_options,
-                num_retries=self.params.num_retries,
+                save_jacobian=save_jacobian,
+                external_jacobian=external_jacobian,
             )
+            if save_jacobian:
+                return res[-1]
             # self.residual.x.array[:] = fem.assemble_vector(fem.form(F)).array
         except Exception as e:
             # self.residual.x.array[:] = fem.assemble_vector(fem.form(F)).array
@@ -749,6 +752,12 @@ class NeoHookean:
 
     def _objective_function_value(self):
         return self._assemble_scalar_parallel(self._objective_function())
+
+    def _constraints(self):
+        return []
+
+    def _constraints_values(self):
+        return [self._assemble_scalar_parallel(j) for j in self._constraints()]
 
     def _set_optimized_variable(self, x: np.ndarray):
         self.e.x.array[:] = x
@@ -770,22 +779,27 @@ class NeoHookean:
         # Solve \partial L/\partial \lambda = 0, i.e. the governing equation it self
         self.log("Solving forward problem")
         self.mesh.comm.Barrier()
-        try:
-            self.forward()
-        except Exception as e:
-            self.log(f"Exception occurred: {e}")
-            self.log("Return inf as loss value")
-            return np.inf
+
+        jac = self.forward(save_jacobian=True)
+        self.jac = jac
+
         loss = self._objective_function_value()
-        self.log(f"Loss: {loss}")
+        constraints = self._constraints_values()
+        self.log(f"Loss: {loss} Constraints: {constraints}")
         self.mesh.comm.Barrier()
-        return loss
+        return loss, constraints
 
-    def _grad_j_state(self, j, state, state_test):
-        return ufl.derivative(j, state, state_test)
+    def _grad_state(self, state, state_test):
+        return [
+            ufl.derivative(j, state, state_test)
+            for j in [self._objective_function()] + self._constraints()
+        ]
 
-    def _grad_j_opt(self, j, opt, opt_test):
-        return ufl.derivative(j, opt, opt_test)
+    def _grad_opt(self, opt, opt_test):
+        return [
+            ufl.derivative(j, opt, opt_test)
+            for j in [self._objective_function()] + self._constraints()
+        ]
 
     @property
     def gradient_accumulation_steps(self):
@@ -807,73 +821,76 @@ class NeoHookean:
             state_space = self.V_u
 
         # Solve \partial L/\partial u = 0 for \lambda. It's a linear equation.
-        j = self._objective_function()
         Pi = self._potential_energy()
-
-        dj_du_ufl = -self._grad_j_state(j, state_var, ufl.TestFunction(state_space))
-
-        l_solve = ufl.TrialFunction(state_space)
-
-        # lhs_ufl = ufl.derivative(
-        #     ufl.derivative(
-        #         ufl.derivative(
-        #             Pi, self.u, lagrangian
-        #         ),  # Derivative of potential energy w.r.t. u and inner product with lagrangian
-        #         self.u,
-        #         self.u_test,
-        #     ),  # Derivative w.r.t. u
-        #     lagrangian,
-        #     l_test,  # Tangent matrix * l_test
-        # )
-        lhs_ufl = ufl.derivative(
-            ufl.derivative(Pi, state_var, ufl.TestFunction(state_space)),
-            state_var,
-            l_solve,
-        )
-
-        # Solve using SNES-based linear solver (drop-in for LinearProblem)
-        from src.solvers import solve_linear_problem
-
-        # solution function for adjoint
-        lagrangian = fem.Function(state_space, name="adjoint")
-
-        solve_linear_problem(
-            lhs_ufl,
-            dj_du_ufl,
-            lagrangian,
-            bcs=self.adjoint_bcs,
-            linear_solver="mumps",
-            comm=self.mesh.comm,
-            logger=self.log,
-        )
-
-        # Compute \partial L/\partial param
         v_e = ufl.TestFunction(self.V_e)
-        dj_dp_form = fem.form(self._grad_j_opt(j, self.e, v_e))
-        dj_dp = fem.assemble_vector(dj_dp_form)
-        dj_dp.scatter_reverse(InsertMode.add)
 
-        dfl_dp_form = fem.form(
-            ufl.derivative(ufl.derivative(Pi, state_var, lagrangian), self.e, v_e)
-        )
-        dfl_dp = fem.assemble_vector(dfl_dp_form)
-        dfl_dp.scatter_reverse(InsertMode.add)
+        grad_state_ls = self._grad_state(state_var, ufl.TestFunction(state_space))
+        grad_opt_ls = self._grad_opt(self.e, v_e)
 
-        grad = dj_dp.array + dfl_dp.array
-        self.mesh.comm.Barrier()
+        grad_ls = []
 
-        self.gradient.x.array[:] = grad
-        self.gradient.x.scatter_forward()
-        return grad.copy()
+        for i, (dj_du, dj_de) in enumerate(zip(grad_state_ls, grad_opt_ls)):
+            self.log(
+                f"Solving gradient for {'the objective function' if i==0 else f'constraint {i}'}"
+            )
+            dj_du_ufl = -dj_du
+
+            l_solve = ufl.TrialFunction(state_space)
+
+            lhs_ufl = ufl.derivative(
+                ufl.derivative(Pi, state_var, ufl.TestFunction(state_space)),
+                state_var,
+                l_solve,
+            )
+
+            # Solve using SNES-based linear solver (drop-in for LinearProblem)
+            from src.solvers import solve_linear_problem
+
+            # solution function for adjoint
+            lagrangian = fem.Function(state_space, name="adjoint")
+            self.log("Solving for lagrangian")
+            solve_linear_problem(
+                lhs_ufl,
+                dj_du_ufl,
+                lagrangian,
+                bcs=self.adjoint_bcs,
+                linear_solver="mumps",
+                comm=self.mesh.comm,
+                logger=self.log,
+                A_cache=self.jac,
+            )
+
+            # Compute \partial L/\partial param
+            self.log("Assembling adjoint gradient")
+            dj_dp_form = fem.form(dj_de)
+            dj_dp = fem.assemble_vector(dj_dp_form)
+            dj_dp.scatter_reverse(InsertMode.add)
+
+            dfl_dp_form = fem.form(
+                ufl.derivative(ufl.derivative(Pi, state_var, lagrangian), self.e, v_e)
+            )
+            dfl_dp = fem.assemble_vector(dfl_dp_form)
+            dfl_dp.scatter_reverse(InsertMode.add)
+
+            grad = dj_dp.array + dfl_dp.array
+            self.mesh.comm.Barrier()
+
+            grad_ls.append(grad.copy())
+
+        self.jac.destroy()
+        return grad_ls
 
     def optimize(self, warm_start=False):
-        from src.solvers import BarzilaiBorwein
+        from src.solvers import MMASolver, BarzilaiBorwein, CCSAMMASolver
+        from functools import partial
 
         if not warm_start:
             x = self._initial_values()
             self._set_optimized_variable(x)
         else:
             x = self.e.x.array[:]
+
+        ### Get ready for BarzilaiBorwein
         if self.n_component == 1:
             optimizer = BarzilaiBorwein(
                 variant="short",
@@ -903,7 +920,41 @@ class NeoHookean:
                 _, m = self.V_e.sub(i).collapse()
                 collapse_map.append(m)
 
-        grad = None
+        ### Get ready for MMA
+        bounds = np.array(self._bounds())
+        mma_solver = MMASolver(
+            len(x), bounds[:, 0], bounds[:, 1], move_limit=self.params.clip_gradient
+        )
+
+        ### Get ready for CCSA-MMA
+        def x_new_eval(x, init_x):
+            self.log(f"Performing an inner evaluation for CCSA-MMA")
+            init_u = self.u.x.array[:].copy()
+            grad = init_x - x
+            if self.params.design_fields_disabled is not None:
+                for comp_id in self.params.design_fields_disabled:
+                    grad[collapse_map[comp_id]] = 0
+            fem.set_bc(grad, self.gradient_dirichlet_bcs)
+            if self.params.design_fields_disabled is not None:
+                for comp_id in self.params.design_fields_disabled:
+                    grad[collapse_map[comp_id]] = 0
+            x = init_x - grad
+            for j, bound in zip(range(len(x)), self._bounds()):
+                if bound[0] is not None:
+                    x[j] = max(bound[0], x[j])
+                if bound[1] is not None:
+                    x[j] = min(bound[1], x[j])
+            loss, constraints = self.eval(x)
+            self.u.x.array[:] = init_u
+            self.u.x.scatter_forward()
+            self.log(
+                f"Inner evaluation for CCSA-MMA: Loss {loss}, Constraints {constraints}"
+            )
+            return loss, constraints
+
+        ccsamma_solver = CCSAMMASolver(
+            len(x), bounds[:, 0], bounds[:, 1], move_limit=self.params.clip_gradient
+        )
 
         for i in range(self.params.maxiter):
             print()
@@ -911,15 +962,48 @@ class NeoHookean:
             self.log(f"----- Iteration {i} -----")
             if i == 0 and warm_start:
                 # Don't call _set_optimized_variable in this case.
-                res = self.eval()
+                loss, constraints = self.eval()
             else:
-                res = self.eval(x)
-            _grad = self.grad()
-            fem.set_bc(_grad, self.gradient_dirichlet_bcs)
-            grad = _grad if grad is None else grad + _grad
-            if (self._optimize_step + 1) % self.gradient_accumulation_steps == 0:
-                self._loss_history.append(res)
-                self._stage_loss_history.append(res)
+                loss, constraints = self.eval(x)
+
+            self._loss_history.append(loss)
+            self._stage_loss_history.append(loss)
+
+            if len(constraints) > 0 and self.params.optimizer not in ["MMA", "CCSAMMA"]:
+                self.log(
+                    "Warning: Constraints are defined. Using MMA instead of BarzilaiBorwein."
+                )
+                self.params.optimizer = "MMA"
+
+            if self.params.optimizer in ["MMA", "CCSAMMA"]:
+                _grad_ls = self.grad()
+                [fem.set_bc(_grad, self.gradient_dirichlet_bcs) for _grad in _grad_ls]
+                self.log(
+                    f"Get gradient vectors in ranges: {[f'({x.min():.5e},{x.max():.5e}) ' for x in _grad_ls]}"
+                )
+                self.log(f"Start {self.params.optimizer}")
+                if self.params.optimizer == "MMA":
+                    grad = x - mma_solver.step(
+                        x,
+                        loss,
+                        _grad_ls[0],
+                        np.array(constraints),
+                        np.array(_grad_ls[1:]),
+                    )
+                elif self.params.optimizer == "CCSAMMA":
+                    grad = x - ccsamma_solver.step(
+                        x,
+                        loss,
+                        _grad_ls[0],
+                        np.array(constraints),
+                        np.array(_grad_ls[1:]),
+                        eval_func=partial(x_new_eval, init_x=x),
+                    )
+                self.log(f"{self.params.optimizer} completed")
+                fem.set_bc(grad, self.gradient_dirichlet_bcs)
+            elif self.params.optimizer == "BarzilaiBorwein":
+                grad = self.grad()[0]
+                fem.set_bc(grad, self.gradient_dirichlet_bcs)
                 if self.n_component == 1:
                     lr = optimizer.step(x, grad)
                     grad = lr * grad
@@ -935,19 +1019,19 @@ class NeoHookean:
                     a_min=-self.params.clip_gradient,
                     a_max=self.params.clip_gradient,
                 )
-                x = x - grad
-                grad = None
-                for j, bound in zip(range(len(x)), self._bounds()):
-                    if bound[0] is not None:
-                        x[j] = max(bound[0], x[j])
-                    if bound[1] is not None:
-                        x[j] = min(bound[1], x[j])
-                self.mesh.comm.Barrier()
-                self.optimized = True
-            else:
-                self.log(
-                    f"Accumulated gradient {(self._optimize_step + 1) % self.gradient_accumulation_steps}/{self.gradient_accumulation_steps}"
-                )
+
+            if self.params.design_fields_disabled is not None:
+                for comp_id in self.params.design_fields_disabled:
+                    grad[collapse_map[comp_id]] = 0
+            x = x - grad
+
+            for j, bound in zip(range(len(x)), self._bounds()):
+                if bound[0] is not None:
+                    x[j] = max(bound[0], x[j])
+                if bound[1] is not None:
+                    x[j] = min(bound[1], x[j])
+            self.mesh.comm.Barrier()
+            self.optimized = True
             terminate = self._optimize_callback()
             if terminate:
                 break
@@ -989,11 +1073,13 @@ class NeoHookean:
                 < (1 - self._loss_history[-2] / self._loss_history[-3])
                 * np.sign(self._loss_history[-2])
                 < self.params.relative_tol
-            ) or (
-                len(self._stage_loss_history) > 100
-                and self._stage_loss_history[-100]
-                == min(self._stage_loss_history[-100:])
             ):
+                self.log("Converged.")
+                return True
+            elif len(self._stage_loss_history) > 500 and self._stage_loss_history[
+                -50
+            ] == min(self._stage_loss_history[-50:]):
+                self.log("Loss not decreasing.")
                 return True
         return False
 
@@ -1196,7 +1282,7 @@ class NeoHookean:
         point_data = {
             u_field.name: u_field,
             self.e.name: self.e,
-            self.gradient.name: self.gradient,
+            # self.gradient.name: self.gradient,
             # self.residual.name: self.residual,
         }
 
@@ -1236,7 +1322,7 @@ class NeoHookean:
         cell_data = {
             "strain": e,
             "PK2_stress": pk2,
-            "Cauchy_stress": sigma,
+            # "Cauchy_stress": sigma,
             "strain_energy_density": psi,
             "mpi_rank": rank_field,
             "domain_markers": domain_markers,
@@ -1250,11 +1336,11 @@ class NeoHookean:
                 else scalar_space
             )
             e_projected = project(self.e, space, "Optimized_projected")
-            grad_projected = project(self.gradient, space, "Gradient_projected")
+            # grad_projected = project(self.gradient, space, "Gradient_projected")
             cell_data.update(
                 {
                     "Optimized_projected": e_projected,
-                    "Gradient_projected": grad_projected,
+                    # "Gradient_projected": grad_projected,
                 }
             )
 

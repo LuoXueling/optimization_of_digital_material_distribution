@@ -11,6 +11,7 @@ from petsc4py import PETSc
 import numpy as np
 import ufl
 import functools
+from scipy.optimize import minimize
 
 
 def solve_nonlinear_problem(
@@ -22,6 +23,8 @@ def solve_nonlinear_problem(
     comm=None,
     logger=print,
     snes_options=None,
+    save_jacobian=False,
+    external_jacobian=None,
 ):
     """
     Solve nonlinear problem using PETSc SNES (Scalable Nonlinear Equations Solvers).
@@ -83,7 +86,11 @@ def solve_nonlinear_problem(
     jacobian_form = fem.form(J)
 
     # Create matrix and vectors
-    A = dolfinx.fem.petsc.create_matrix(jacobian_form)
+    A = (
+        dolfinx.fem.petsc.create_matrix(jacobian_form)
+        if external_jacobian is None
+        else external_jacobian
+    )
     b = dolfinx.fem.petsc.create_vector(residual_form)
 
     # Callback for residual assembly (compatible with SNES.setFunction)
@@ -121,10 +128,11 @@ def solve_nonlinear_problem(
         x.copy(u.x.petsc_vec)
         u.x.scatter_forward()
 
-        # Zero and assemble Jacobian
-        J_mat.zeroEntries()
-        dolfinx.fem.petsc.assemble_matrix(J_mat, jacobian_form, bcs=bcs)
-        J_mat.assemble()
+        if not external_jacobian:
+            # Zero and assemble Jacobian
+            J_mat.zeroEntries()
+            dolfinx.fem.petsc.assemble_matrix(J_mat, jacobian_form, bcs=bcs)
+            J_mat.assemble()
 
         return PETSc.Mat.Structure.SAME_NONZERO_PATTERN
 
@@ -237,7 +245,12 @@ def solve_nonlinear_problem(
 
     # Cleanup
     snes.destroy()
-    A.destroy()
+    if not save_jacobian:
+        A.destroy()
+    elif num_iterations == 0 and not external_jacobian:
+        A.zeroEntries()
+        dolfinx.fem.petsc.assemble_matrix(A, jacobian_form, bcs=bcs)
+        A.assemble()
     b.destroy()
     x.destroy()
 
@@ -261,125 +274,10 @@ def solve_nonlinear_problem(
             f"SNES solver did not converge after {num_iterations} iterations (reason: {reason})"
         )
 
-    return num_iterations, converged
-
-
-def solve_nonlinear_problem_with_retry(
-    F,
-    u,
-    bcs=None,
-    J=None,
-    linear_solver="mumps",
-    comm=None,
-    logger=print,
-    snes_options=None,
-    num_retries=3,
-    reset_to_initial=False,
-):
-    """
-    Wrapper for solve_nonlinear_problem that implements retry logic with state restoration.
-
-    If the solver fails (raises an exception), this function will retry up to num_retries times.
-    By default, it continues from the last failed state with perturbation, or optionally resets
-    to the initial state with perturbation on each retry.
-
-    Arguments:
-        F: The residual form (UFL form)
-        u: The solution function (fem.Function)
-        bcs: List of Dirichlet boundary conditions (optional)
-        J: The Jacobian form (optional, will be computed automatically if not provided)
-        linear_solver: Linear solver type (default: "mumps")
-        comm: MPI communicator (default: MPI.COMM_WORLD)
-        logger: A callable used for logging (default: print)
-        snes_options: PETSc SNES options as dict (optional)
-        num_retries: Number of retry attempts if solver fails (default: 3)
-        reset_to_initial: If True, reset to initial state + perturbation on each retry.
-                         If False, continue from last failed state + perturbation (default: False)
-
-    Returns:
-        tuple: (num_iterations, converged) from successful solve
-
-    Raises:
-        Exception: If all retry attempts fail
-
-    Example:
-        >>> # Continue from last failed state (default)
-        >>> solve_nonlinear_problem_with_retry(
-        ...     F, u, bcs=bcs, J=J,
-        ...     snes_options={"snes_rtol": 1e-8},
-        ...     num_retries=5
-        ... )
-        >>>
-        >>> # Reset to initial state on each retry
-        >>> solve_nonlinear_problem_with_retry(
-        ...     F, u, bcs=bcs, J=J,
-        ...     snes_options={"snes_rtol": 1e-8},
-        ...     num_retries=5,
-        ...     reset_to_initial=True
-        ... )
-    """
-    if comm is None:
-        comm = MPI.COMM_WORLD
-
-    if num_retries is None or num_retries == 0:
-        return solve_nonlinear_problem(
-            F=F,
-            u=u,
-            bcs=bcs,
-            J=J,
-            linear_solver=linear_solver,
-            comm=comm,
-            logger=logger,
-            snes_options=snes_options,
-        )
-
-    # Store the initial state of u
-    u_initial = u.x.array.copy()
-
-    for attempt in range(num_retries + 1):
-        try:
-            if attempt > 0:
-                logger(f"Retry attempt {attempt}/{num_retries}...")
-
-                if reset_to_initial:
-                    # Strategy 1: Reset to initial state with increasing perturbation
-                    logger("  Strategy: Reset to initial state with perturbation")
-                    perturbation = 1e-10 * 10**attempt * np.random.randn(len(u_initial))
-                    u.x.array[:] = u_initial + perturbation * u_initial
-                else:
-                    # Strategy 2: Continue from last failed state with small perturbation
-                    logger("  Strategy: Continue from last state with perturbation")
-                    u_last = u.x.array.copy()
-                    perturbation = 1e-15 * 10**attempt * np.random.randn(len(u_last))
-                    u.x.array[:] = u_last + perturbation * u_last
-
-                u.x.scatter_forward()
-
-            # Attempt to solve
-            result = solve_nonlinear_problem(
-                F=F,
-                u=u,
-                bcs=bcs,
-                J=J,
-                linear_solver=linear_solver,
-                comm=comm,
-                logger=logger,
-                snes_options=snes_options,
-            )
-
-            # If we get here, the solve was successful
-            if attempt > 0:
-                logger(f"Retry attempt {attempt} succeeded!")
-            return result
-
-        except Exception as e:
-            if attempt < num_retries:
-                logger(f"Solver failed on attempt {attempt + 1}: {str(e)}")
-                logger(f"Restoring initial state and retrying...")
-            else:
-                # Final attempt failed, re-raise the exception
-                logger(f"All {num_retries + 1} solver attempts failed. Giving up.")
-                raise
+    if not save_jacobian:
+        return num_iterations, converged
+    else:
+        return num_iterations, converged, A
 
 
 def solve_linear_problem(
@@ -487,8 +385,10 @@ def solve_linear_problem(
     snes.setFromOptions()
 
     # Assemble A and b once before solve
-    assemble_matrix(A)
-    assemble_rhs(b)
+    if not A_external:
+        assemble_matrix(A)
+    if not b_external:
+        assemble_rhs(b)
 
     logger(f"Starting SNES linear solve (snes_type={snes_type}, ksp={ksp.getType()})")
 
@@ -516,6 +416,417 @@ def solve_linear_problem(
     x.destroy()
 
     return u
+
+
+class MMASolver:
+    def __init__(self, local_n_vars, xmin, xmax, move_limit=0.2, comm=MPI.COMM_WORLD):
+        self.comm = comm
+        self.local_n_vars = local_n_vars
+        self.xmin = np.array(xmin)
+        self.xmax = np.array(xmax)
+        self.move_limit = move_limit
+
+        # History variables for asymptote updates (local to rank)
+        self.x_old1 = None
+        self.x_old2 = None
+        self.L = None
+        self.U = None
+        self.iter = 0
+
+    def step(
+        self, x_local, f0_global, grad_f0_local, f_i_global=None, grad_f_i_local=None
+    ):
+        """
+        Executes one distributed MMA step. Safe for unconstrained problems.
+        """
+        x_local = np.array(x_local)
+
+        # Safely handle the unconstrained case inputs
+        if f_i_global is None or len(f_i_global) == 0:
+            n_constraints = 0
+        else:
+            f_i_global = np.atleast_1d(f_i_global)
+            grad_f_i_local = np.atleast_2d(grad_f_i_local)
+            n_constraints = len(f_i_global)
+
+        # ---------------------------------------------------------
+        # 1. Update Asymptotes (Strictly Local Operations)
+        # ---------------------------------------------------------
+        if self.iter < 2:
+            self.L = x_local - (self.xmax - self.xmin)
+            self.U = x_local + (self.xmax - self.xmin)
+        else:
+            oscillation = (x_local - self.x_old1) * (self.x_old1 - self.x_old2)
+            gamma = np.ones(self.local_n_vars)
+            gamma[oscillation < 0] = 0.7
+            gamma[oscillation > 0] = 1.2
+            self.L = x_local - gamma * (self.x_old1 - self.L)
+            self.U = x_local + gamma * (self.U - self.x_old1)
+
+        asymp_min_dist = 1e-4 * (self.xmax - self.xmin)
+        self.L = np.maximum(self.L, x_local - 100 * (self.xmax - self.xmin))
+        self.U = np.minimum(self.U, x_local + 100 * (self.xmax - self.xmin))
+        self.L = np.minimum(self.L, x_local - asymp_min_dist)
+        self.U = np.maximum(self.U, x_local + asymp_min_dist)
+
+        # Define dynamic bounds (alpha, beta) based on move limits
+        alpha = np.maximum(self.xmin, self.L + 0.1 * (x_local - self.L))
+        alpha = np.maximum(alpha, x_local - self.move_limit * (self.xmax - self.xmin))
+        beta = np.minimum(self.xmax, self.U - 0.1 * (self.U - x_local))
+        beta = np.minimum(beta, x_local + self.move_limit * (self.xmax - self.xmin))
+
+        # ---------------------------------------------------------
+        # 2. UNCONSTRAINED BYPASS
+        # ---------------------------------------------------------
+        if n_constraints == 0:
+            # In an unconstrained monotonic subproblem, variables are pushed directly
+            # to their dynamic bounds based solely on the sign of the local gradient.
+            x_new_local = np.where(grad_f0_local > 0, alpha, beta)
+
+            # Update Local History and return immediately (No MPI communication)
+            self.x_old2 = self.x_old1 if self.x_old1 is not None else x_local.copy()
+            self.x_old1 = x_local.copy()
+            self.iter += 1
+            return x_new_local
+
+        # ---------------------------------------------------------
+        # 3. Compute Approximation Parameters (Requires MPI Reduce)
+        # ---------------------------------------------------------
+        # print("Approximation", flush=True)
+        p0_local = np.maximum(0, grad_f0_local) * (self.U - x_local) ** 2
+        q0_local = np.maximum(0, -grad_f0_local) * (x_local - self.L) ** 2
+
+        P_local = np.maximum(0, grad_f_i_local) * (self.U - x_local) ** 2
+        Q_local = np.maximum(0, -grad_f_i_local) * (x_local - self.L) ** 2
+
+        obj_sum_local = np.sum(
+            p0_local / (self.U - x_local) + q0_local / (x_local - self.L)
+        )
+        cons_sum_local = np.sum(
+            P_local / (self.U - x_local) + Q_local / (x_local - self.L), axis=1
+        )
+
+        # Synchronize parameters across the communicator
+        obj_sum_global = self.comm.allreduce(obj_sum_local, op=MPI.SUM)
+        cons_sum_global = self.comm.allreduce(cons_sum_local, op=MPI.SUM)
+
+        r0_global = f0_global - obj_sum_global
+        R_global = f_i_global - cons_sum_global
+
+        # ---------------------------------------------------------
+        # 4. The Analytical Primal-Dual Mapping & Dual Solve
+        # ---------------------------------------------------------
+        def x_from_lambda(lam):
+            P_lam = p0_local + lam @ P_local
+            Q_lam = q0_local + lam @ Q_local
+            sqrt_QP = np.sqrt(Q_lam / np.maximum(P_lam, 1e-15))
+            x_unc = (self.L + self.U * sqrt_QP) / (1.0 + sqrt_QP)
+            return np.clip(x_unc, alpha, beta)
+
+        def dual_objective(lam):
+            x_opt_local = x_from_lambda(lam)
+
+            obj_term_local = np.sum(
+                p0_local / (self.U - x_opt_local) + q0_local / (x_opt_local - self.L)
+            )
+            cons_term_local = np.sum(
+                P_local / (self.U - x_opt_local) + Q_local / (x_opt_local - self.L),
+                axis=1,
+            )
+
+            # Synchronize the evaluation of the dual function
+            obj_term_global = self.comm.allreduce(obj_term_local, op=MPI.SUM)
+            cons_term_global = self.comm.allreduce(cons_term_local, op=MPI.SUM)
+
+            obj_val_global = r0_global + obj_term_global
+            cons_val_global = R_global + cons_term_global
+
+            dual_val = obj_val_global + np.dot(lam, cons_val_global)
+            return -dual_val, -cons_val_global
+
+        # print("Start optimization", flush=True)
+        # All MPI ranks solve the exact same small dual problem identically
+        lam0 = np.zeros(n_constraints)
+        res = minimize(
+            dual_objective,
+            lam0,
+            method="L-BFGS-B",
+            jac=True,
+            bounds=[(0, None)] * n_constraints,
+            options={"ftol": 1e-6, "maxls": 20, "maxiter": 100, "disp": True},
+        )
+        # print("End optimization", flush=True)
+        x_new_local = x_from_lambda(res.x)
+        # print("lambda: ", res.x)
+
+        # 5. Update Local History
+        self.x_old2 = self.x_old1 if self.x_old1 is not None else x_local.copy()
+        self.x_old1 = x_local.copy()
+        self.iter += 1
+
+        return x_new_local
+
+
+class CCSAMMASolver:
+    def __init__(self, local_n_vars, xmin, xmax, move_limit=0.2, comm=MPI.COMM_WORLD):
+        self.comm = comm
+        self.local_n_vars = local_n_vars
+        self.xmin = np.array(xmin)
+        self.xmax = np.array(xmax)
+        self.move_limit = move_limit
+
+        # History variables for asymptote updates (local to rank)
+        self.x_old1 = None
+        self.x_old2 = None
+
+        # NLopt explicitly tracks the asymptote distance (sigma)
+        self.sigma = None
+        self.L = None
+        self.U = None
+        self.iter = 0
+
+        # GCMMA Specific: Convexity Penalty Parameters
+        self.rho = 1.0
+        self.rhoc = None
+
+    def step(
+        self,
+        x_local,
+        f0_global,
+        grad_f0_local,
+        f_i_global=None,
+        grad_f_i_local=None,
+        eval_func=None,
+    ):
+        """
+        Executes one distributed GCMMA step strictly following NLopt's CCSA implementation.
+        """
+        x_local = np.array(x_local)
+
+        # Safely handle the unconstrained case inputs
+        if f_i_global is None or len(f_i_global) == 0:
+            n_constraints = 0
+            f_i_global = np.array([])
+            grad_f_i_local = np.zeros((0, self.local_n_vars))
+        else:
+            f_i_global = np.atleast_1d(f_i_global)
+            grad_f_i_local = np.atleast_2d(grad_f_i_local)
+            n_constraints = len(f_i_global)
+
+        # ---------------------------------------------------------
+        # 1. Update Asymptotes (NLopt sigma tracking logic)
+        # ---------------------------------------------------------
+        if self.iter == 0:
+            self.sigma = (self.move_limit / 0.9) * (self.xmax - self.xmin)
+
+            # --- Objective Penalty Initialization ---
+            max_g0 = self.comm.allreduce(np.max(np.abs(grad_f0_local)), op=MPI.MAX)
+            # Store the minimum floor so we can use it during decay later
+            self.rho_min = max(1e-5 * max_g0, 1e-12)
+            self.rho = self.rho_min
+
+            # --- Constraint Penalty Initialization (rhoc) ---
+            if n_constraints > 0:
+                self.rhoc_min = np.zeros(n_constraints)
+                self.rhoc = np.zeros(n_constraints)
+                for i in range(n_constraints):
+                    # Find the max gradient for this specific constraint across all MPI ranks
+                    max_gi = self.comm.allreduce(
+                        np.max(np.abs(grad_f_i_local[i])), op=MPI.MAX
+                    )
+                    self.rhoc_min[i] = max(1e-5 * max_gi, 1e-12)
+                    self.rhoc[i] = self.rhoc_min[i]
+            else:
+                self.rhoc_min = np.array([])
+                self.rhoc = np.array([])
+
+        else:
+            # Decay penalties at the start of a new outer iteration.
+            # CRITICAL: Use your calculated `_min` values here, NOT NLopt's hardcoded 1e-5!
+            self.rho = max(0.1 * self.rho, self.rho_min)
+            if n_constraints > 0:
+                self.rhoc = np.maximum(0.1 * self.rhoc, self.rhoc_min)
+
+            # Oscillation tracking for sigma update
+            if self.iter > 1:
+                dx2 = (x_local - self.x_old1) * (self.x_old1 - self.x_old2)
+                gam = np.ones(self.local_n_vars)
+                gam[dx2 < 0] = 0.7
+                gam[dx2 > 0] = 1.2
+                self.sigma = self.sigma * gam
+
+                # NLopt safety bounds for sigma
+                self.sigma = np.clip(
+                    self.sigma,
+                    0.01 * (self.xmax - self.xmin),
+                    10.0 * (self.xmax - self.xmin),
+                )
+
+        self.L = x_local - self.sigma
+        self.U = x_local + self.sigma
+
+        # Dynamic Bounds (NLopt limits the step to 90% of sigma)
+        alpha = np.maximum(self.xmin, x_local - 0.9 * self.sigma)
+        alpha = np.maximum(alpha, x_local - self.move_limit * (self.xmax - self.xmin))
+        beta = np.minimum(self.xmax, x_local + 0.9 * self.sigma)
+        beta = np.minimum(beta, x_local + self.move_limit * (self.xmax - self.xmin))
+
+        # ---------------------------------------------------------
+        # 2. GCMMA Inner Iteration Loop
+        # ---------------------------------------------------------
+        inner_iter = 0
+        max_inner = 15
+        x_new_local = x_local.copy()
+
+        while inner_iter < max_inner:
+            # A. Compute CCSA Parameters mapped to SciPy P/Q dual formulation
+            # NLopt formulates dual variables u & v, which mathematically equal the following P & Q
+            v0 = np.abs(grad_f0_local) * self.sigma + 0.5 * self.rho
+            P0 = (
+                np.maximum(0, grad_f0_local) * self.sigma**2
+                + 0.25 * self.rho * self.sigma
+            )
+            Q0 = (
+                np.maximum(0, -grad_f0_local) * self.sigma**2
+                + 0.25 * self.rho * self.sigma
+            )
+
+            r0_local = np.sum(v0)
+            r0 = f0_global - self.comm.allreduce(r0_local, op=MPI.SUM)
+
+            if n_constraints > 0:
+                v_i = (
+                    np.abs(grad_f_i_local) * self.sigma + 0.5 * self.rhoc[:, np.newaxis]
+                )
+                P_i = (
+                    np.maximum(0, grad_f_i_local) * self.sigma**2
+                    + 0.25 * self.rhoc[:, np.newaxis] * self.sigma
+                )
+                Q_i = (
+                    np.maximum(0, -grad_f_i_local) * self.sigma**2
+                    + 0.25 * self.rhoc[:, np.newaxis] * self.sigma
+                )
+
+                R_local = np.sum(v_i, axis=1)
+                R = f_i_global - self.comm.allreduce(R_local, op=MPI.SUM)
+            else:
+                P_i = np.zeros((0, self.local_n_vars))
+                Q_i = np.zeros((0, self.local_n_vars))
+                R = np.array([])
+
+            # B. Solve the Dual Problem
+            def x_from_lambda(lam):
+                if n_constraints > 0:
+                    P_lam = P0 + lam @ P_i
+                    Q_lam = Q0 + lam @ Q_i
+                else:
+                    P_lam = P0
+                    Q_lam = Q0
+
+                sqrt_QP = np.sqrt(Q_lam / np.maximum(P_lam, 1e-15))
+                x_unc = (self.L + self.U * sqrt_QP) / (1.0 + sqrt_QP)
+                return np.clip(x_unc, alpha, beta)
+
+            def dual_objective(lam):
+                x_opt_local = x_from_lambda(lam)
+
+                obj_term_local = np.sum(
+                    P0 / (self.U - x_opt_local) + Q0 / (x_opt_local - self.L)
+                )
+                cons_term_local = np.sum(
+                    P_i / (self.U - x_opt_local) + Q_i / (x_opt_local - self.L), axis=1
+                )
+
+                obj_term_global = self.comm.allreduce(obj_term_local, op=MPI.SUM)
+                cons_term_global = self.comm.allreduce(cons_term_local, op=MPI.SUM)
+
+                dual_val = (r0 + obj_term_global) + np.dot(lam, R + cons_term_global)
+                return -dual_val, -(R + cons_term_global)
+
+            if n_constraints == 0:
+                x_new_local = x_from_lambda(np.array([]))
+            else:
+                lam0 = np.zeros(n_constraints)
+                res = minimize(
+                    dual_objective,
+                    lam0,
+                    method="L-BFGS-B",
+                    jac=True,
+                    bounds=[(0, None)] * n_constraints,
+                    options={"ftol": 1e-6, "maxls": 20, "maxiter": 100, "disp": False},
+                )
+                x_new_local = x_from_lambda(res.x)
+
+            # C. The Conservativeness Check (Inner Loop Physics Test)
+            if eval_func is None:
+                break  # Bypass inner loop if no evaluation function is provided
+
+            # 1. Run the forward finite element check
+            eval_res = eval_func(x_new_local)
+
+            if isinstance(eval_res, tuple):
+                fcur, fcval_cur = eval_res
+            else:
+                fcur = eval_res
+                fcval_cur = np.array([])
+
+            fcval_cur = np.atleast_1d(fcval_cur)
+
+            # 2. Re-evaluate the approximation (gval, gcval) at x_new (NLopt formulation)
+            dx = x_new_local - x_local
+            dx2 = dx**2
+            sigma2 = self.sigma**2
+            denominv = 1.0 / (sigma2 - dx2)
+
+            # The linear term multiplier (matches 'c = sigma2 * dx' in mma.c)
+            c = sigma2 * dx
+
+            u0 = grad_f0_local
+            val0_local = np.sum((u0 * c + v0 * dx2) * denominv)
+            gval = f0_global + self.comm.allreduce(val0_local, op=MPI.SUM)
+
+            gcval = np.zeros(n_constraints)
+            if n_constraints > 0:
+                u_i = grad_f_i_local
+                val_i_local = np.sum((u_i * c + v_i * dx2) * denominv, axis=1)
+                gcval = f_i_global + self.comm.allreduce(val_i_local, op=MPI.SUM)
+
+            wval_local = np.sum(0.5 * dx2 * denominv)
+            wval = self.comm.allreduce(wval_local, op=MPI.SUM)
+            wval_safe = max(wval, 1e-15)
+            # 3. Check and Penalize if not conservative
+            inner_done = gval >= fcur
+            if n_constraints > 0:
+                inner_done = inner_done and np.all(gcval >= fcval_cur)
+
+            if inner_done:
+                break
+
+            # NLopt: multiply rho by up to 10 if step is rejected
+            if fcur > gval:
+                self.rho = min(
+                    10.0 * self.rho, 1.1 * (self.rho + (fcur - gval) / wval_safe)
+                )
+
+            if n_constraints > 0:
+                for i in range(n_constraints):
+                    if fcval_cur[i] > gcval[i]:
+                        self.rhoc[i] = min(
+                            10.0 * self.rhoc[i],
+                            1.1
+                            * (self.rhoc[i] + (fcval_cur[i] - gcval[i]) / wval_safe),
+                        )
+
+            inner_iter += 1
+
+        # ---------------------------------------------------------
+        # 3. Update History
+        # ---------------------------------------------------------
+        self.x_old2 = self.x_old1 if self.x_old1 is not None else x_local.copy()
+        self.x_old1 = x_local.copy()
+        self.iter += 1
+
+        return x_new_local
 
 
 class BarzilaiBorwein:

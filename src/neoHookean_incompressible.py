@@ -8,7 +8,7 @@ from src.neoHookean_tmc import NeoHookeanTMC
 from src.utils import project
 import numpy as np
 from mpi4py import MPI
-from src.solvers import solve_nonlinear_problem_with_retry
+from src.solvers import solve_nonlinear_problem
 from dolfinx.la import InsertMode
 import warnings
 
@@ -52,7 +52,7 @@ class NeoHookeanIncompressible(NeoHookean):
         self.w = fem.Function(self.V_w)
         self.u, self.p = ufl.split(self.w)
 
-    def forward(self):
+    def forward(self, save_jacobian=False, external_jacobian=None):
         psi = self._strain_energy_density()
 
         # Total potential energy
@@ -65,7 +65,7 @@ class NeoHookeanIncompressible(NeoHookean):
         J = ufl.derivative(F, self.w, ufl.TrialFunction(self.V_w))
 
         # Solve variational problem
-        solve_nonlinear_problem_with_retry(
+        res = solve_nonlinear_problem(
             F,
             self.w,
             bcs=self.dirichlet_bcs,
@@ -73,8 +73,11 @@ class NeoHookeanIncompressible(NeoHookean):
             comm=self.mesh.comm,
             logger=self.log,
             snes_options=self.params.snes_options,
-            num_retries=self.params.num_retries,
+            save_jacobian=save_jacobian,
+            external_jacobian=external_jacobian,
         )
+        if save_jacobian:
+            return res[-1]
 
     def _strain_energy_density(self, F=None, C=None, Eps=None):
         Ic, J, _, _ = self.strain_invariant(F=F, C=C, Eps=Eps)
@@ -176,7 +179,7 @@ class NeoHookeanIncompressibleStaggered(NeoHookeanIncompressible):
         NeoHookean._initialize_fields(self)
         self.p = fem.Function(self.V_p, name="incompressibility")
 
-    def forward(self):
+    def forward(self, save_jacobian=False, external_jacobian=None):
         F = self._deformation_gradient()
         C = self._right_cauchy_green(F=F)
         J = ufl.sqrt(ufl.det(C))
@@ -199,7 +202,7 @@ class NeoHookeanIncompressibleStaggered(NeoHookeanIncompressible):
             J_u = ufl.derivative(F_u, self.u, self.du)
 
             # Solve nonlinear problem
-            solve_nonlinear_problem_with_retry(
+            res = solve_nonlinear_problem(
                 F_u,
                 self.u,
                 bcs=self.dirichlet_bcs,
@@ -207,8 +210,11 @@ class NeoHookeanIncompressibleStaggered(NeoHookeanIncompressible):
                 comm=self.mesh.comm,
                 logger=self.log,
                 snes_options=self.params.snes_options,
-                num_retries=self.params.num_retries,
+                save_jacobian=save_jacobian,
+                external_jacobian=external_jacobian,
             )
+            if save_jacobian:
+                return res[-1]
 
             # Project (J-1) into V_p then we have the increment of p
             dp = project(J - 1, self.V_p, "dp")

@@ -45,57 +45,13 @@ class NeoHookeanTopoOpt(NeoHookean):
         return normalized_scalar
 
     def _objective_function(self):
-        return None
-
-    def _stored_energy(self):
         return self._normalized_scalar_expression(
             self._strain_energy_density() * self.dx, "stored_energy"
         )
 
-    def _weight_diff(self):
-        return self._normalized_scalar_expression(
-            (self.density - self.params.target_volume) * self.dx,
-            "weight",
-            # ref_value=(1.0 - self.params.target_volume) * self.area,
-        )
-
-    def _objective_function_value(self):
-        stored_energy = self._stored_energy()
-        stored_energy_val = 1 + self._assemble_scalar_parallel(stored_energy)
-
-        softplus = lambda x: np.log(1 + np.exp(100 * x)) / 100
-        weight = self._weight_diff()
-        weight_val = self.params.get("volume_cons_weight", 10.0) * softplus(
-            self._assemble_scalar_parallel(weight)
-        )
-
-        energy_current = self._assemble_scalar_parallel(
-            self._strain_energy_density() * self.dx
-        )
-        weight_current = self._assemble_scalar_parallel(
-            self.density / self.area * self.dx
-        )
-
-        self.log(f"Stored energy: {stored_energy_val}, weight constraint: {weight_val}")
-        self.log(f"Current energy: {energy_current}")
-        self.log(f"Current weight: {weight_current} ({self.params.target_volume})")
-        return stored_energy_val + weight_val
-
-    def _grad_j_state(self, j, state, state_test):
-        stored_energy = self._stored_energy()
-        return ufl.derivative(stored_energy, state, state_test)
-
-    def _grad_j_opt(self, j, opt, opt_test):
-        stored_energy = self._stored_energy()
-        weight_diff_form = self._weight_diff()
-        softplus_diff = (
-            self.params.get("volume_cons_weight", 10.0)
-            * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
-                self._assemble_scalar_parallel(weight_diff_form)
-            )
-            * ufl.derivative(weight_diff_form, opt, opt_test)
-        )
-        return ufl.derivative(stored_energy, opt, opt_test) + softplus_diff
+    def _constraints(self):
+        volume = (self.density - self.params.target_volume) / self.area * self.dx
+        return [volume]
 
     def _initial_values(self):
         return np.array([1.0] * len(self.e.x.array))
@@ -361,9 +317,8 @@ class NeoHookeanTopoOpt(NeoHookean):
                 * np.sign(self._loss_history[-2])
                 < self.params.relative_tol
             ) or (
-                len(self._stage_loss_history) > 100
-                and self._stage_loss_history[-100]
-                == min(self._stage_loss_history[-100:])
+                len(self._stage_loss_history) > 500
+                and self._stage_loss_history[-50] == min(self._stage_loss_history[-50:])
             ):
                 if (
                     self.penalty == self.params.init_penalty
@@ -554,7 +509,7 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
         if clip:
             filt_local = np.clip(filt_local, self.params.min_density, 1.0)
         if self._dens_map is None:
-            return filt_local
+            return filt_local.copy()
         else:
             full = phi_array.copy()
             full[self._dens_map] = filt_local
@@ -568,10 +523,10 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
         In _set_optimized_variable, we set the filtered field into self.e, and the adjoint solver will get us the gradient for the filtered field.
         Meanwhile, x that is being updated is always the underlying numerical field, so we are one step from the gradient of x
         """
-        grad = super().grad(x)
+        grad_ls = super().grad(x)
 
         # Map gradient from filtered field back to unfiltered design via Helmholtz solve (symmetric)
-        grad_unfiltered = self._apply_filter(grad, clip=False)
+        grad_unfiltered = [self._apply_filter(grad, clip=False) for grad in grad_ls]
         return grad_unfiltered
 
     def _set_optimized_variable(self, x: np.ndarray):

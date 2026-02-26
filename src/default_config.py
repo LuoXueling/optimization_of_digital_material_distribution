@@ -7,27 +7,30 @@ from src.utils import dotdict
 
 
 params = dotdict(
-    # Project settings
+    ### Project settings
     project_name="beam_rightcenter_load",
     output_root="outputs",
-    # FEM settings
+    ### FEM settings
     dim=2,
     q_deg=2,
     elem_order=1,  # Only setting order of displacement field. The pressure field and optimized variables are kept first order
-    # Geometry settings
+    ### Geometry settings
     width=4,
     height=1,
     mesh_size=0.02,
-    # Optimization settings
-    # One can also set different learning rates for different components by adding a suffix, such as lr_0, lr_1, etc.
-    # If not set differently, the learning rate for all components are set to lr.
+    ### Optimization settings
     output_per_step=10,
     maxiter=10000,
+    optimizer="BarzilaiBorwein",  # "MMA"/"CCSAMMA" for constrained optimization, "BarzilaiBorwein" for unconstrained
+    clip_gradient=0.2,  # also the Moving limit in MMA/CCSAMMA
+    design_fields_disabled=None,  # If not None, it's a list of component id
+    # When using "BarzilaiBorwein"
+    # One can also set different learning rates for different components by adding a suffix, such as lr_0, lr_1, etc.
+    # If not set differently, the learning rate for all components are set to lr.
     lr=1,
     upper_bound_lr=None,
     lower_bound_lr=None,
-    clip_gradient=0.2,  # clipping acts on lr-scaled gradients
-    # Solver settings
+    ### Solver settings
     relative_tol=0.001,
     snes_options={
         "snes_type": "newtonls",
@@ -37,7 +40,7 @@ params = dotdict(
         "snes_max_it": 100,
     },
     num_retries=None,  # Number of retries after the solver fails. Add random pertubation to the initial value after failure. Useful when numerical error is essential.
-    # Elasticity parameters
+    ### Elasticity parameters
     E=10.0,
     nu=0.3,
 )
@@ -61,16 +64,16 @@ params.update(
         #       deformation state at the BEGINNING of the loading step and is not updated during Newton-Raphson.
         body_force_applied_on="reference",  # Default to gravity force, which doesn't change by the volume change
         tractions_applied_on="reference",
-        # Body force
+        ### Body force
         B=None,  # Body force per unit volume # Modify for 3D
-        # Domain definitions (for subdomain integration)
+        ### Domain definitions (for subdomain integration)
         # domain_dict: Define domains using geometric marker functions
         #   Format: {lambda x: condition: "domain_name"}
         #   Examples:
         #     lambda x: x[0] < 0.5: "left_half"
         #     lambda x: (x[0] - 0.5)**2 + (x[1] - 0.5)**2 < 0.25: "circle"
         domain_dict=None,
-        # Mark Dirichlet boundary subdomains and values
+        ### Mark Dirichlet boundary subdomains and values
         # dirichlet_bcs_dict: Define Dirichlet BCs using geometric marker functions
         #   - Key: lambda function that marks boundary (e.g., lambda x: np.isclose(x[0], 0.0))
         #   - Value: tuple, callable function, or dict for component-wise BCs
@@ -82,11 +85,11 @@ params.update(
         #   Component-wise example:
         #     lambda x: np.isclose(x[0], 0.0): {0: 0.0, 1: lambda x: 0.01*x[0]}  # u_x=0, u_y varies
         dirichlet_bcs_dict=None,
-        # Mark Neumann boundary subdomains and values
+        ### Mark Neumann boundary subdomains and values
         # It has a syntax similar to dirichlet_bcs_dict, except that only the Constant and Function is supported
         # If there is only one component, it is treated as pressure load that follows the surface normal
         neumann_bcs_dict=None,
-        # An alternative to define Dirichlet/Neumann boundaries by using msh2xdmf.py
+        ### An alternative to define Dirichlet/Neumann boundaries by using msh2xdmf.py
         # This approach can be used together with dirichlet_bcs_dict and neumann_bcs_dict
         boundaries=None,  # boundaries is a MeshTags with some boundaries marked for neumann bcs
         association_table=None,  # A dict that maps boundary names to boundary id
