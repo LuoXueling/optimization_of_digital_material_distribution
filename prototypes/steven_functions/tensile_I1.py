@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 cs = [0, 0.1755, 0.4669, 1.0, 2.0895]
 stretch_crit = np.array([2.05, 1.80, 1.79, 1.73, 1.45])
 I1_crit = stretch_crit**2 + 2 / stretch_crit
-
+print(I1_crit)
 z = np.polyfit(cs, I1_crit, 2)
 p = np.poly1d(z)
 plt.figure(figsize=(4, 3), dpi=300)
@@ -46,12 +46,12 @@ formula = (
     + r"$c$"
     + f"{r'$+$' if z[2]>0 else r'$-$'}{abs(z[2]):.3f}"
 )
-plt.text(0.05, 0.85, formula, transform=plt.gca().transAxes)
+plt.text(0.95, 0.7, formula, ha="right", transform=plt.gca().transAxes)
 plt.xlabel("Composition " + r"$c$")
 plt.ylabel(r"$I_1^{\text{crit}}$")
 
-plt.legend(loc="lower right", frameon=False)
+plt.legend(loc="upper right", frameon=False)
 plt.tight_layout()
-# plt.savefig("fit_tensile_modulus.pdf")
+plt.savefig("I_1_crit.pdf")
 plt.show()
 plt.close()
