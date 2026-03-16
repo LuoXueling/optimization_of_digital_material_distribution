@@ -217,7 +217,7 @@ class StevenNearlyIncompressibleDistOpt(StevenNearlyIncompressible):
 
     def _define_design_dirichlet_boundaries(self):
         return NeoHookeanTopoOpt._define_design_dirichlet_boundaries(
-            self, fixed_value=None
+            self, fixed_value=self.params.get("c", 1.0)
         )
 
 
