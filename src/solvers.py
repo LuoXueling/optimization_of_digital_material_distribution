@@ -568,12 +568,21 @@ class MMASolver:
 
 
 class CCSAMMASolver:
-    def __init__(self, local_n_vars, xmin, xmax, move_limit=0.2, comm=MPI.COMM_WORLD):
+    def __init__(
+        self,
+        local_n_vars,
+        xmin,
+        xmax,
+        move_limit=0.2,
+        rel_tolerance=1e-5,
+        comm=MPI.COMM_WORLD,
+    ):
         self.comm = comm
         self.local_n_vars = local_n_vars
         self.xmin = np.array(xmin)
         self.xmax = np.array(xmax)
         self.move_limit = move_limit
+        self.rel_tolerance = rel_tolerance
 
         # History variables for asymptote updates (local to rank)
         self.x_old1 = None
@@ -588,6 +597,9 @@ class CCSAMMASolver:
         # GCMMA Specific: Convexity Penalty Parameters
         self.rho = 1.0
         self.rhoc = None
+
+        self.tol_f0 = None
+        self.tol_fc = None
 
     def step(
         self,
@@ -612,6 +624,14 @@ class CCSAMMASolver:
             f_i_global = np.atleast_1d(f_i_global)
             grad_f_i_local = np.atleast_2d(grad_f_i_local)
             n_constraints = len(f_i_global)
+
+        if self.iter == 0:
+            # Initialize tolerances based on initial function values
+            self.tol_f0 = max(self.rel_tolerance * abs(f0_global), 1e-8)
+            self.tol_fc = np.full(
+                n_constraints, self.rel_tolerance * np.abs(f_i_global)
+            )
+            self.tol_fc[self.tol_fc < 1e-8] = 1e-8
 
         # ---------------------------------------------------------
         # 1. Update Asymptotes (NLopt sigma tracking logic)
@@ -795,9 +815,9 @@ class CCSAMMASolver:
             wval = self.comm.allreduce(wval_local, op=MPI.SUM)
             wval_safe = max(wval, 1e-15)
             # 3. Check and Penalize if not conservative
-            inner_done = gval >= fcur
+            inner_done = (gval + self.tol_f0) >= fcur
             if n_constraints > 0:
-                inner_done = inner_done and np.all(gcval >= fcval_cur)
+                inner_done = inner_done and np.all((gcval + self.tol_fc) >= fcval_cur)
 
             if inner_done:
                 break

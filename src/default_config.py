@@ -22,6 +22,7 @@ params = dotdict(
     output_per_step=10,
     maxiter=10000,
     optimizer="BarzilaiBorwein",  # "MMA"/"CCSAMMA" for constrained optimization, "BarzilaiBorwein" for unconstrained
+    ccsamma_rel_tolerance=1e-5,
     clip_gradient=0.2,  # also the Moving limit in MMA/CCSAMMA
     design_fields_disabled=None,  # If not None, it's a list of component id
     # When using "BarzilaiBorwein"

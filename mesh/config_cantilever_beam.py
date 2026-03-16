@@ -27,6 +27,7 @@ params = dotdict(
     output_per_step=1,
     maxiter=10000,
     fix_density_h=None,
+    optimizer="CCSAMMA",
     # fix_design_domain="left_half",
     # Solver settings
     relative_tol=0.0001,
