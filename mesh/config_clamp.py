@@ -20,23 +20,22 @@ params = dotdict(
     height=1,
     mesh_size=0.005,
     # Optimization settings
-    target_volume=0.3,
+    target_volume=0.4,
     volume_cons_weight=10,
     min_density=0.001,
     init_penalty=2.0,
     max_penalty=6.0,
     gradient_filter=None,
-    density_filter=0.01,
-    clip_gradient=0.1,
-    output_per_step=1,
+    filter_radius=[0.01, 0.05],
+    optimizer="CCSAMMA",
+    ccsamma_rel_tolerance=1e-5,
+    clip_gradient=0.01,
+    output_per_step=10,
     maxiter=10000,
-    lr=50,
-    lr_1=0,
-    # lower_bound_lr=1.0,
     fix_density_h=None,
     fix_design_domain="load",
     # Solver settings
-    relative_tol=0.0005,
+    relative_tol=1e-6,
     snes_options={
         "snes_type": "newtonls",
         "snes_linesearch_type": "bt",
@@ -51,7 +50,6 @@ params = dotdict(
     c=1.0,
     E=10.0,
     nu=0.49,
-    kr_coef=1e-3,
 )
 
 _mesh = dmesh.create_rectangle(

@@ -18,6 +18,7 @@ params = dotdict(
     maxiter=10000,
     optimizer="BarzilaiBorwein",
     lr=1,
+    filter_radius=0.05,
     fix_design_domain="fix_design",
     # Solver settings
     relative_tol=1e-4,

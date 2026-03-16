@@ -7,7 +7,7 @@ import dolfinx.io as io
 from dolfinx.la import InsertMode
 import ufl
 from src.default_config import params
-from src.solvers import solve_nonlinear_problem
+from src.solvers import solve_nonlinear_problem, solve_linear_problem
 import os
 import importlib
 import shutil
@@ -124,8 +124,119 @@ class NeoHookean:
 
         self.optimized = False
 
+        if self.params.filter_radius is not None:
+            self._filter_vars = {}
+            for i in range(self.n_component):
+                if self.n_component == 1:
+                    V, m = self.V_e, None
+                else:
+                    V, m = self.V_e.sub(i).collapse()
+                self._filter_vars[i] = {
+                    "V": V,
+                    "map": m,
+                    "raw": fem.Function(V, name=f"Raw {i}"),
+                    "filt": fem.Function(V, name=f"Filtered {i}"),
+                }
+                self._setup_filter(component_id=i)
+
         self.records = pd.DataFrame()
         self.records.index.name = "Step"
+
+    def _setup_filter(self, component_id):
+        rf = self.params.filter_radius
+        if isinstance(rf, list) or isinstance(rf, tuple):
+            rf = rf[component_id]
+        if rf is None:
+            self.log(
+                f"No filter applied for component {component_id} since filter_radius is None"
+            )
+            return
+        self.log(f"Initialize PDE filter for component {component_id} with radius {rf}")
+        u = ufl.TrialFunction(self._filter_vars[component_id]["V"])
+        _filter_v = ufl.TestFunction(self._filter_vars[component_id]["V"])
+        dx = ufl.dx(metadata={"quadrature_degree": self.params.q_deg})
+        a = u * _filter_v * dx + rf**2 * ufl.dot(ufl.grad(u), ufl.grad(_filter_v)) * dx
+        _filter_a = fem.form(a)
+        A = fem.petsc.assemble_matrix(_filter_a)
+        A.assemble()
+        _filter_mat = A
+        _phi_tmp = fem.Function(
+            self._filter_vars[component_id]["V"], name="DesignInput"
+        )
+        _filter_rhs_form = fem.form(_phi_tmp * _filter_v * dx)
+        _filter_rhs = fem.petsc.create_vector(_filter_rhs_form)
+        _filter_solution = fem.Function(
+            self._filter_vars[component_id]["V"], name="FilterSolution"
+        )
+
+        self._filter_vars[component_id].update(
+            {
+                "a": _filter_a,
+                "mat": _filter_mat,
+                "phi_tmp": _phi_tmp,
+                "rhs_form": _filter_rhs_form,
+                "rhs": _filter_rhs,
+                "solution": _filter_solution,
+            }
+        )
+
+    def _apply_filter(self, phi_array, component_id, clip=True):
+        # Applies Helmholtz PDE filtering
+        rf = self.params.filter_radius
+        if isinstance(rf, list) or isinstance(rf, tuple):
+            rf = rf[component_id]
+        if rf is None:
+            self.log(
+                f"No filter applied for component {component_id} since filter_radius is None"
+            )
+            return phi_array
+        self.log(f"Applying filter")
+        m = self._filter_vars[component_id]["map"]
+        if m is None:
+            src = phi_array
+        else:
+            src = phi_array[m]
+        n_local = self._filter_vars[component_id]["V"].dofmap.index_map.size_local
+        self._filter_vars[component_id]["phi_tmp"].x.array[:n_local] = src[:n_local]
+        self._filter_vars[component_id]["phi_tmp"].x.scatter_forward()
+        with self._filter_vars[component_id]["rhs"].localForm() as loc:
+            loc.set(0.0)
+        fem.petsc.assemble_vector(
+            self._filter_vars[component_id]["rhs"],
+            self._filter_vars[component_id]["rhs_form"],
+        )
+        self._filter_vars[component_id]["rhs"].ghostUpdate(
+            addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE
+        )
+        solve_linear_problem(
+            self._filter_vars[component_id]["a"],
+            self._filter_vars[component_id]["rhs_form"],
+            self._filter_vars[component_id]["solution"],
+            bcs=[],
+            linear_solver="mumps",
+            comm=self.mesh.comm,
+            A_cache=self._filter_vars[component_id]["mat"],
+            b_cache=self._filter_vars[component_id]["rhs"],
+            logger=self.log,
+        )
+        filt_local = self._filter_vars[component_id]["solution"].x.array
+        if clip:
+            bounds = np.array(self._bounds())
+            if m is None:
+                filt_local = np.clip(filt_local, bounds[:, 0], bounds[:, 1])
+            else:
+                filt_local = np.clip(filt_local, bounds[m, 0], bounds[m, 1])
+        if m is None:
+            return filt_local.copy()
+        else:
+            full = phi_array.copy()
+            full[m] = filt_local
+            return full
+
+    def _filter_all(self, x, clip=True):
+        for comp_id in range(self.n_component):
+            x = self._apply_filter(x, component_id=comp_id, clip=clip)
+        return x
 
     def save_checkpoint(self, filename: str | None = None):
         try:
@@ -756,11 +867,38 @@ class NeoHookean:
     def _constraints(self):
         return []
 
+    def _constraints_rhs(self):
+        return None
+
     def _constraints_values(self):
-        return [self._assemble_scalar_parallel(j) for j in self._constraints()]
+        rhs = self._constraints_rhs()
+        if rhs is None:
+            return [self._assemble_scalar_parallel(j) for j in self._constraints()]
+        else:
+            return [
+                self._assemble_scalar_parallel(j) - r
+                for j, r in zip(self._constraints(), rhs)
+            ]
 
     def _set_optimized_variable(self, x: np.ndarray):
-        self.e.x.array[:] = x
+        if self.params.filter_radius is not None:
+            filtered = self._filter_all(x)
+            for comp_id in range(self.n_component):
+                self._filter_vars[comp_id]["raw"].x.array[:] = (
+                    x
+                    if self._filter_vars[comp_id]["map"] is None
+                    else x[self._filter_vars[comp_id]["map"]]
+                )
+                self._filter_vars[comp_id]["raw"].x.scatter_forward()
+                self._filter_vars[comp_id]["filt"].x.array[:] = (
+                    filtered
+                    if self._filter_vars[comp_id]["map"] is None
+                    else filtered[self._filter_vars[comp_id]["map"]]
+                )
+                self._filter_vars[comp_id]["filt"].x.scatter_forward()
+            self.e.x.array[:] = filtered
+        else:
+            self.e.x.array[:] = x
         self.e.x.scatter_forward()
         self._apply_design_bcs()
 
@@ -878,7 +1016,12 @@ class NeoHookean:
             grad_ls.append(grad.copy())
 
         self.jac.destroy()
-        return grad_ls
+
+        if self.params.filter_radius is not None:
+            grad_unfiltered = [self._filter_all(grad, clip=False) for grad in grad_ls]
+            return grad_unfiltered
+        else:
+            return grad_ls
 
     def optimize(self, warm_start=False):
         from src.solvers import MMASolver, BarzilaiBorwein, CCSAMMASolver
@@ -939,11 +1082,7 @@ class NeoHookean:
                 for comp_id in self.params.design_fields_disabled:
                     grad[collapse_map[comp_id]] = 0
             x = init_x - grad
-            for j, bound in zip(range(len(x)), self._bounds()):
-                if bound[0] is not None:
-                    x[j] = max(bound[0], x[j])
-                if bound[1] is not None:
-                    x[j] = min(bound[1], x[j])
+            x = np.clip(x, a_min=bounds[:, 0], a_max=bounds[:, 1])
             loss, constraints = self.eval(x)
             self.u.x.array[:] = init_u
             self.u.x.scatter_forward()
@@ -953,7 +1092,11 @@ class NeoHookean:
             return loss, constraints
 
         ccsamma_solver = CCSAMMASolver(
-            len(x), bounds[:, 0], bounds[:, 1], move_limit=self.params.clip_gradient
+            len(x),
+            bounds[:, 0],
+            bounds[:, 1],
+            move_limit=self.params.clip_gradient,
+            rel_tolerance=self.params.ccsamma_rel_tolerance,
         )
 
         for i in range(self.params.maxiter):
@@ -1025,11 +1168,7 @@ class NeoHookean:
                     grad[collapse_map[comp_id]] = 0
             x = x - grad
 
-            for j, bound in zip(range(len(x)), self._bounds()):
-                if bound[0] is not None:
-                    x[j] = max(bound[0], x[j])
-                if bound[1] is not None:
-                    x[j] = min(bound[1], x[j])
+            x = np.clip(x, a_min=bounds[:, 0], a_max=bounds[:, 1])
             self.mesh.comm.Barrier()
             self.optimized = True
             terminate = self._optimize_callback()
@@ -1285,6 +1424,11 @@ class NeoHookean:
             # self.gradient.name: self.gradient,
             # self.residual.name: self.residual,
         }
+
+        if self.params.filter_radius is not None:
+            for comp_id in range(self.n_component):
+                point_data[f"Raw_{comp_id}"] = self._filter_vars[comp_id]["raw"]
+                point_data[f"Filtered_{comp_id}"] = self._filter_vars[comp_id]["filt"]
 
         return point_data
 

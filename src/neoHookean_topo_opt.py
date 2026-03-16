@@ -356,72 +356,12 @@ class NeoHookeanTopoOpt(NeoHookean):
         return cell_data
 
 
-class NeoHookeanMappedTopoOpt(NeoHookeanTopoOpt):
-    @property
-    def density(self):
-        raw = self.e if self.n_component == 1 else self.e[self.density_component_id]
-        rho = 1 / (1 + ufl.exp(-raw))
-        return rho
-
-    def _initial_values(self):
-        return np.array([1.0] * len(self.e.x.array))
-
-    def _bounds(self):
-        return [(-100, 100)] * len(self.e.x.array)
-
-    @property
-    def _degradation(self):
-        min_density = fem.Constant(self.mesh, self.params.min_density)
-        return min_density + (1 - min_density) * self.density / (
-            1 + 8 * (1 - self.density)
-        )
-
-    def grad(self, x=None):
-        return NeoHookean.grad(self, x)
-
-    def _optimize_callback(self, *args) -> bool:
-        return NeoHookean._optimize_callback(self, *args)
-
-    def _get_point_data(self, main_field=None):
-        point_data = NeoHookean._get_point_data(self, main_field)
-        scalar_space = fem.functionspace(self.mesh, ("CG", 1))
-        density_projected = project(self.density, scalar_space, "density_projected")
-        point_data["density_projected"] = density_projected
-        return point_data
-
-    def _get_cell_data(self):
-        return NeoHookean._get_cell_data(self)
-
-    def _define_design_dirichlet_boundaries(self, *args, **kwargs):
-        kwargs.update(dict(fixed_value=10.0))
-        return NeoHookeanTopoOpt._define_design_dirichlet_boundaries(
-            self, *args, **kwargs
-        )
-
-
-class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
+class NeoHookeanPDEFilteredTopoOpt(NeoHookeanTopoOpt):
     """
     Applies Helmholtz PDE filtering and tanh projection in-place on self.e
     after every design update. The optimized variables correspond to the
     density DOFs; gradients are not filtered.
     """
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        # density subspace (handles multi-component)
-        if self.n_component == 1:
-            self.V_dens = self.V_e
-            self._dens_map = None
-        else:
-            self.V_dens, self._dens_map = self.V_e.sub(
-                self.density_component_id
-            ).collapse()
-
-        # snapshot of raw (unfiltered) density for diagnostics
-        self.raw_density = fem.Function(self.V_dens, name="Raw density")
-        # filtered density for diagnostics
-        self.rho_filt = fem.Function(self.V_dens, name="Filtered density")
-        self._setup_filter()
 
     @property
     def density(self):
@@ -435,21 +375,30 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
         proj = num / den
         return proj
 
+    def grad(self, x=None):
+        return NeoHookean.grad(self, x)
+
     def _initial_values(self):
         x0 = np.zeros(len(self.e.x.array))
-        if self._dens_map is None:
+        if (
+            self.params.filter_radius is None
+            or self._filter_vars[self.density_component_id]["map"] is None
+        ):
             x0[:] = 1.0
         else:
-            x0[self._dens_map] = 1.0
+            x0[self._filter_vars[self.density_component_id]["map"]] = 1.0
         return x0
 
     def _bounds(self):
-        bnds = [(None, None)] * len(self.e.x.array)
-        if self._dens_map is None:
+        bnds = [(-np.inf, np.inf)] * len(self.e.x.array)
+        if (
+            self.params.filter_radius is None
+            or self._filter_vars[self.density_component_id]["map"] is None
+        ):
             for i in range(len(bnds)):
                 bnds[i] = (self.params.min_density, 1.0)
         else:
-            for idx in self._dens_map:
+            for idx in self._filter_vars[self.density_component_id]["map"]:
                 bnds[idx] = (self.params.min_density, 1.0)
         return bnds
 
@@ -460,97 +409,15 @@ class NeoHookeanPDEFilteredTopoOpt(NeoHookeanMappedTopoOpt):
     def _optimize_callback(self, *args) -> bool:
         return NeoHookeanTopoOpt._optimize_callback(self, *args)
 
-    def _setup_filter(self):
-        self.log(f"Initialize PDE filter")
-        rf = self.params.density_filter
-        u = ufl.TrialFunction(self.V_dens)
-        self._filter_v = ufl.TestFunction(self.V_dens)
-        dx = ufl.dx(metadata={"quadrature_degree": self.params.q_deg})
-        a = (
-            u * self._filter_v * dx
-            + rf**2 * ufl.dot(ufl.grad(u), ufl.grad(self._filter_v)) * dx
-        )
-        self._filter_a = fem.form(a)
-        A = fem.petsc.assemble_matrix(self._filter_a)
-        A.assemble()
-        self._filter_mat = A
-        self._phi_tmp = fem.Function(self.V_dens, name="DesignInput")
-        self._filter_rhs_form = fem.form(self._phi_tmp * self._filter_v * dx)
-        self._filter_rhs = fem.petsc.create_vector(self._filter_rhs_form)
-        self._filter_solution = fem.Function(self.V_dens, name="FilterSolution")
-
-    def _apply_filter(self, phi_array, clip=True):
-        self.log(f"Applying density filter")
-        if self._dens_map is None:
-            src = phi_array
-        else:
-            src = phi_array[self._dens_map]
-        n_local = self.V_dens.dofmap.index_map.size_local
-        self._phi_tmp.x.array[:n_local] = src[:n_local]
-        self._phi_tmp.x.scatter_forward()
-        with self._filter_rhs.localForm() as loc:
-            loc.set(0.0)
-        fem.petsc.assemble_vector(self._filter_rhs, self._filter_rhs_form)
-        self._filter_rhs.ghostUpdate(
-            addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE
-        )
-        solve_linear_problem(
-            self._filter_a,
-            self._filter_rhs_form,
-            self._filter_solution,
-            bcs=[],
-            linear_solver="mumps",
-            comm=self.mesh.comm,
-            A_cache=self._filter_mat,
-            b_cache=self._filter_rhs,
-            logger=self.log,
-        )
-        filt_local = self._filter_solution.x.array
-        if clip:
-            filt_local = np.clip(filt_local, self.params.min_density, 1.0)
-        if self._dens_map is None:
-            return filt_local.copy()
-        else:
-            full = phi_array.copy()
-            full[self._dens_map] = filt_local
-            return full
-
-    def _filter_density(self, phi_array):
-        return self._apply_filter(phi_array, clip=True)
-
-    def grad(self, x=None):
-        """
-        In _set_optimized_variable, we set the filtered field into self.e, and the adjoint solver will get us the gradient for the filtered field.
-        Meanwhile, x that is being updated is always the underlying numerical field, so we are one step from the gradient of x
-        """
-        grad_ls = super().grad(x)
-
-        # Map gradient from filtered field back to unfiltered design via Helmholtz solve (symmetric)
-        grad_unfiltered = [self._apply_filter(grad, clip=False) for grad in grad_ls]
-        return grad_unfiltered
-
-    def _set_optimized_variable(self, x: np.ndarray):
-        filtered = self._filter_density(x)
-        if self._dens_map is None:
-            self.raw_density.x.array[:] = x
-            self.rho_filt.x.array[:] = filtered
-            self.e.x.array[:] = filtered
-        else:
-            self.raw_density.x.array[:] = x[self._dens_map]
-            self.rho_filt.x.array[:] = filtered[self._dens_map]
-            self.e.x.array[:] = x  # keep full vector, but replace density comp
-            self.e.x.array[self._dens_map] = filtered[self._dens_map]
-        self.raw_density.x.scatter_forward()
-        self.rho_filt.x.scatter_forward()
-        self.e.x.scatter_forward()
-        self._apply_design_bcs()
-        return
-
     def _get_point_data(self, main_field=None):
-        point_data = NeoHookeanMappedTopoOpt._get_point_data(self, main_field)
-        point_data["density_raw"] = self.raw_density
-        point_data["density_filtered"] = self.rho_filt
+        point_data = NeoHookeanTopoOpt._get_point_data(self, main_field)
+        scalar_space = fem.functionspace(self.mesh, ("CG", 1))
+        density_projected = project(self.density, scalar_space, "density_projected")
+        point_data["density_projected"] = density_projected
         return point_data
+
+    def _get_cell_data(self):
+        return NeoHookean._get_cell_data(self)
 
     def _define_design_dirichlet_boundaries(self, *args, **kwargs):
         kwargs.update(dict(fixed_value=1.0))
