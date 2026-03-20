@@ -26,7 +26,7 @@ params = dotdict(
     init_penalty=2.0,
     max_penalty=6.0,
     gradient_filter=None,
-    filter_radius=[0.01, 0.05],
+    filter_radius=[0.03, 0.03],
     optimizer="CCSAMMA",
     ccsamma_rel_tolerance=1e-5,
     clip_gradient=0.01,
@@ -35,7 +35,7 @@ params = dotdict(
     fix_density_h=None,
     fix_design_domain="load",
     # Solver settings
-    relative_tol=1e-6,
+    relative_tol=5e-5,
     snes_options={
         "snes_type": "newtonls",
         "snes_linesearch_type": "bt",

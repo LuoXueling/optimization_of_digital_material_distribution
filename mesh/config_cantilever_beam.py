@@ -22,12 +22,12 @@ params = dotdict(
     init_penalty=6.0,
     max_penalty=6.0,
     gradient_filter=None,
-    density_filter=0.01,
+    filter_radius=0.01,
     clip_gradient=0.02,
     output_per_step=1,
-    maxiter=10000,
+    maxiter=100,
     fix_density_h=None,
-    optimizer="CCSAMMA",
+    optimizer="MMA",
     # fix_design_domain="left_half",
     # Solver settings
     relative_tol=0.0001,
@@ -44,7 +44,7 @@ params = dotdict(
     # Elasticity parameters
     c=1.0,
     E=10.0,
-    nu=0.49,
+    nu=0.3,
     kr_coef=1e-4,
 )
 
@@ -72,7 +72,7 @@ params.update(
             lambda x: np.isclose(x[0], params.width)
             & np.isclose(x[1], 0, atol=params.mesh_size * 1.1): (
                 0.0,
-                -0.001,
+                -0.01,
             ),  # Modify for 3D
         },
     )

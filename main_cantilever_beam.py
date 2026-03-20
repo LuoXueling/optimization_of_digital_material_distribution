@@ -51,5 +51,5 @@ class StevenTopoOpt(NeoHookeanPDEFilteredTopoOpt):
         return proj
 
 
-prob = StevenTopoOpt(config_path=args.config)
+prob = NeoHookeanPDEFilteredTopoOpt(config_path=args.config)
 prob.optimize()
