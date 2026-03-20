@@ -38,9 +38,15 @@ def project(expression, target_space, name="projected"):
     u_proj.x.scatter_forward()
 
     # Clean up PETSc objects to avoid MPI communicator leak
+    pc = solver.getPC()
+    pc.destroy()
     solver.destroy()
     A.destroy()
     b.destroy()
+
+    # Cleanup after project (called frequently in topology optimization)
+    import gc
+    gc.collect()
 
     u_proj.name = name
     return u_proj

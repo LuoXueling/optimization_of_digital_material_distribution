@@ -243,7 +243,11 @@ def solve_nonlinear_problem(
     num_iterations = snes.getIterationNumber()
     final_residual = snes.getFunctionNorm()
 
-    # Cleanup
+    # Cleanup - explicitly destroy KSP and PC to prevent memory leaks
+    ksp = snes.getKSP()
+    pc = ksp.getPC()
+    pc.destroy()
+    ksp.destroy()
     snes.destroy()
     if not save_jacobian:
         A.destroy()
@@ -273,6 +277,10 @@ def solve_nonlinear_problem(
         raise Exception(
             f"SNES solver did not converge after {num_iterations} iterations (reason: {reason})"
         )
+
+    # Final cleanup before return
+    import gc
+    gc.collect()
 
     if not save_jacobian:
         return num_iterations, converged
@@ -408,12 +416,21 @@ def solve_linear_problem(
         )
     logger(f"SNES linear solve converged in {its} iterations (reason {reason})")
 
+    # Cleanup - explicitly destroy KSP and PC to prevent memory leaks
+    ksp = snes.getKSP()
+    pc = ksp.getPC()
+    pc.destroy()
+    ksp.destroy()
     snes.destroy()
     if not A_external:
         A.destroy()
     if not b_external:
         b.destroy()
     x.destroy()
+
+    # Final cleanup before return
+    import gc
+    gc.collect()
 
     return u
 

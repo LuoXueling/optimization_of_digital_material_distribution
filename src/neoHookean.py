@@ -18,6 +18,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pickle
 import pandas as pd
+import gc
 
 
 class NeoHookean:
@@ -141,6 +142,7 @@ class NeoHookean:
 
         self.records = pd.DataFrame()
         self.records.index.name = "Step"
+        self._cache = {}  # Cache for reusable objects
 
     def _setup_filter(self, component_id):
         rf = self.params.filter_radius
@@ -919,11 +921,21 @@ class NeoHookean:
         self.mesh.comm.Barrier()
 
         jac = self.forward(save_jacobian=True)
-        self.jac = jac
+        self._temp_jac = jac  # Store temporarily, destroy after grad()
 
         loss = self._objective_function_value()
         constraints = self._constraints_values()
         self.log(f"Loss: {loss} Constraints: {constraints}")
+
+        # Clean up after forward solve
+        gc.collect()
+        try:
+            from petsc4py import PETSc
+
+            PETSc.garbage_cleanup()
+        except:
+            pass
+
         self.mesh.comm.Barrier()
         return loss, constraints
 
@@ -995,7 +1007,7 @@ class NeoHookean:
                 linear_solver="mumps",
                 comm=self.mesh.comm,
                 logger=self.log,
-                A_cache=self.jac,
+                A_cache=self._temp_jac if hasattr(self, "_temp_jac") else None,
             )
 
             # Compute \partial L/\partial param
@@ -1011,11 +1023,27 @@ class NeoHookean:
             dfl_dp.scatter_reverse(InsertMode.add)
 
             grad = dj_dp.array + dfl_dp.array
+
+            # Explicitly delete temporary vectors to help GC
+            del dj_dp, dfl_dp, dj_dp_form, dfl_dp_form
+
             self.mesh.comm.Barrier()
 
             grad_ls.append(grad.copy())
 
-        self.jac.destroy()
+        # Destroy jacobian immediately after use
+        if hasattr(self, "_temp_jac") and self._temp_jac is not None:
+            self._temp_jac.destroy()
+            self._temp_jac = None
+
+        # Clean up after adjoint solve
+        gc.collect()
+        try:
+            from petsc4py import PETSc
+
+            PETSc.garbage_cleanup()
+        except:
+            pass
 
         if self.params.filter_radius is not None:
             grad_unfiltered = [self._filter_all(grad, clip=False) for grad in grad_ls]
@@ -1099,15 +1127,57 @@ class NeoHookean:
             rel_tolerance=self.params.ccsamma_rel_tolerance,
         )
 
+        # Memory tracking
+        try:
+            import psutil
+            import os as _os
+
+            process = psutil.Process(_os.getpid())
+            mem_tracking = True
+
+            # Check petsc4py version and warn if >= 3.20
+            try:
+                from petsc4py import PETSc
+
+                version = PETSc.Sys.getVersion()
+                if version >= (3, 20, 0):
+                    self.log(
+                        f"WARNING: petsc4py {version[0]}.{version[1]}.{version[2]} has known MPI memory leaks"
+                    )
+                    self.log("Recommendations:")
+                    self.log(
+                        "  1. Downgrade: conda install -c conda-forge 'petsc4py<=3.19.6'"
+                    )
+                    self.log(
+                        "  2. Increase CCSAMMA tolerance to reduce inner evaluations"
+                    )
+                    self.log(
+                        "     params.ccsamma_rel_tolerance = 1e-3  # (default 1e-5)"
+                    )
+                    self.log("See: https://github.com/FEniCS/dolfinx/issues/3522")
+            except:
+                pass
+        except:
+            mem_tracking = False
+
         for i in range(self.params.maxiter):
-            print()
+            self.log("")
             self.mesh.comm.Barrier()
-            self.log(f"----- Iteration {i} -----")
+
+            if mem_tracking:
+                mem_start = process.memory_info().rss / 1024**2
+                self.log(f"----- Iteration {i} ----- Memory: {mem_start:.1f} MB")
+            else:
+                self.log(f"----- Iteration {i} -----")
+
             if i == 0 and warm_start:
                 # Don't call _set_optimized_variable in this case.
                 loss, constraints = self.eval()
             else:
                 loss, constraints = self.eval(x)
+
+            # Force cleanup immediately after eval
+            gc.collect()
 
             self._loss_history.append(loss)
             self._stage_loss_history.append(loss)
@@ -1120,6 +1190,8 @@ class NeoHookean:
 
             if self.params.optimizer in ["MMA", "CCSAMMA"]:
                 _grad_ls = self.grad()
+                # Force cleanup immediately after grad
+                gc.collect()
                 [fem.set_bc(_grad, self.gradient_dirichlet_bcs) for _grad in _grad_ls]
                 self.log(
                     f"Get gradient vectors in ranges: {[f'({x.min():.5e},{x.max():.5e}) ' for x in _grad_ls]}"
@@ -1172,6 +1244,52 @@ class NeoHookean:
             self.mesh.comm.Barrier()
             self.optimized = True
             terminate = self._optimize_callback()
+
+            # Aggressive cleanup at end of each iteration
+            # See: https://github.com/FEniCS/dolfinx/issues/3522
+            if mem_tracking:
+                mem_before_gc = process.memory_info().rss / 1024**2
+
+            # Critical: Call PETSc cleanup BEFORE Python GC
+            # This releases PETSc internal caches first, then Python can collect the wrappers
+            try:
+                from petsc4py import PETSc
+
+                PETSc.garbage_cleanup()
+            except:
+                pass
+
+            # Now Python GC can collect the freed objects
+            # Use generation 2 collection to be more aggressive
+            gc.collect(2)
+            gc.collect(2)
+            gc.collect(2)
+
+            # Second pass of PETSc cleanup
+            try:
+                from petsc4py import PETSc
+
+                PETSc.garbage_cleanup()
+            except:
+                pass
+
+            # Force OS to reclaim memory
+            try:
+                import ctypes
+
+                libc = ctypes.CDLL("libc.so.6")
+                libc.malloc_trim(0)
+            except:
+                pass
+
+            if mem_tracking:
+                mem_after_gc = process.memory_info().rss / 1024**2
+                gc_freed = mem_before_gc - mem_after_gc
+                iter_delta = mem_after_gc - mem_start
+                self.log(
+                    f"Memory: {mem_after_gc:.1f} MB | GC freed: {gc_freed:.1f} MB | Iter delta: {iter_delta:+.1f} MB"
+                )
+
             if terminate:
                 break
         if self.mesh.comm.Get_rank() == 0:
