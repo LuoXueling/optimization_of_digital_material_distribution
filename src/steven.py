@@ -188,10 +188,6 @@ class StevenNearlyIncompressibleTMC(StevenNearlyIncompressible):
 
 
 class StevenNearlyIncompressibleDistOpt(StevenNearlyIncompressible):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._initial_objective_values = {}
-
     def _get_c(self):
         return self.e
 

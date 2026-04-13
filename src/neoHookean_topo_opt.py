@@ -23,7 +23,6 @@ class NeoHookeanTopoOpt(NeoHookean):
         V_scalar = fem.functionspace(self.mesh, ("Lagrange", 1))
         self.filtered_gradient = fem.Function(V_scalar, name="Filtered gradient")
         # Initialize optimization related variables
-        self._initial_objective_values = {}
         self.penalty = self.params.init_penalty
 
     @property
@@ -33,16 +32,6 @@ class NeoHookeanTopoOpt(NeoHookean):
     @property
     def density_component_id(self):
         return 0
-
-    def _normalized_scalar_expression(self, expression, name, ref_value=None):
-        if name not in self._initial_objective_values.keys():
-            self._initial_objective_values[name] = (
-                self._assemble_scalar_parallel(expression)
-                if ref_value is None
-                else ref_value
-            )
-        normalized_scalar = 1 / self._initial_objective_values[name] * expression
-        return normalized_scalar
 
     def _objective_function(self):
         return self._normalized_scalar_expression(

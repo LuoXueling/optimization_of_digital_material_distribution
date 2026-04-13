@@ -106,6 +106,8 @@ class NeoHookean:
             self.V_e = fem.functionspace(
                 self.mesh, ("Lagrange", 1, (self.n_component,))
             )  # vector-valued design variable
+        self.raw_e = fem.Function(self.V_e, name="Raw")
+        self.raw_e.x.array[:] = 1.0
         self.e = fem.Function(self.V_e, name="Optimized")
         self.e.x.array[:] = 1.0
         self.gradient = fem.Function(self.V_e, name="Gradient")
@@ -122,6 +124,7 @@ class NeoHookean:
         self._optimize_step = 0
         self._loss_history = []
         self._stage_loss_history = []
+        self._initial_objective_values = {}
 
         self.optimized = False
 
@@ -143,6 +146,16 @@ class NeoHookean:
         self.records = pd.DataFrame()
         self.records.index.name = "Step"
         self._cache = {}  # Cache for reusable objects
+
+    def _normalized_scalar_expression(self, expression, name, ref_value=None):
+        if name not in self._initial_objective_values.keys():
+            self._initial_objective_values[name] = (
+                self._assemble_scalar_parallel(expression)
+                if ref_value is None
+                else ref_value
+            )
+        normalized_scalar = 1 / self._initial_objective_values[name] * expression
+        return normalized_scalar
 
     def _setup_filter(self, component_id):
         rf = self.params.filter_radius
@@ -902,6 +915,10 @@ class NeoHookean:
         else:
             self.e.x.array[:] = x
         self.e.x.scatter_forward()
+
+        # raw_e stores unfiltered design regardlessly, so warm start gets unfiltered initial values
+        self.raw_e.x.array[:] = x
+        self.raw_e.x.scatter_forward()
         self._apply_design_bcs()
 
     def _bounds(self):
@@ -1059,7 +1076,7 @@ class NeoHookean:
             x = self._initial_values()
             self._set_optimized_variable(x)
         else:
-            x = self.e.x.array[:]
+            x = self.raw_e.x.array[:]
 
         ### Get ready for BarzilaiBorwein
         if self.n_component == 1:
@@ -1170,11 +1187,7 @@ class NeoHookean:
             else:
                 self.log(f"----- Iteration {i} -----")
 
-            if i == 0 and warm_start:
-                # Don't call _set_optimized_variable in this case.
-                loss, constraints = self.eval()
-            else:
-                loss, constraints = self.eval(x)
+            loss, constraints = self.eval(x)
 
             # Force cleanup immediately after eval
             gc.collect()
@@ -1193,6 +1206,10 @@ class NeoHookean:
                 # Force cleanup immediately after grad
                 gc.collect()
                 [fem.set_bc(_grad, self.gradient_dirichlet_bcs) for _grad in _grad_ls]
+                if self.params.design_fields_disabled is not None:
+                    for comp_id in self.params.design_fields_disabled:
+                        for _grad in _grad_ls:
+                            _grad[collapse_map[comp_id]] = 0
                 self.log(
                     f"Get gradient vectors in ranges: {[f'({x.min():.5e},{x.max():.5e}) ' for x in _grad_ls]}"
                 )
@@ -1292,6 +1309,9 @@ class NeoHookean:
 
             if terminate:
                 break
+
+        self.log("Optimization completed.")
+        self.log(f"Initial values: {self._initial_objective_values}")
         if self.mesh.comm.Get_rank() == 0:
             plt.figure(figsize=(4, 3), dpi=300)
             ax = plt.subplot(111)

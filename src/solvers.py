@@ -280,6 +280,7 @@ def solve_nonlinear_problem(
 
     # Final cleanup before return
     import gc
+
     gc.collect()
 
     if not save_jacobian:
@@ -430,6 +431,7 @@ def solve_linear_problem(
 
     # Final cleanup before return
     import gc
+
     gc.collect()
 
     return u
