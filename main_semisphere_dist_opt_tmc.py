@@ -14,15 +14,13 @@ parser = ArgumentParser()
 parser.add_argument(
     "-c", "--config", type=str, default="./mesh/config_semisphere_tmc.py"
 )
-parser.add_argument("-l", "--load", type=str, default=None)
 parser.add_argument("-e", "--case", type=int, default=1)
-parser.add_argument("--thres", type=int, default=3000)
+parser.add_argument("--radius", type=float, default=0.05)
 
 args = parser.parse_args()
 config_path = args.config
-load_ckpt = args.load
 case = args.case
-thres = args.thres
+radius = args.radius
 
 
 class StevenSemisphereDistOpt(StevenNearlyIncompressibleTMCDistOpt):
@@ -62,27 +60,11 @@ class StevenSemisphereDistOpt(StevenNearlyIncompressibleTMCDistOpt):
         tx_val = self._assemble_scalar_parallel(tx)
         ty_val = self._assemble_scalar_parallel(ty)
 
-        smooth = thres / 10
-        softplus = lambda x: ufl.conditional(
-            ufl.lt(x, thres * 10),
-            ufl.ln(1 + ufl.exp(x / smooth)) * smooth,
-            x,
-        )
-        c = self._get_c()
-        grad_c = ufl.grad(c)
-        grad_norm = (
-            softplus(ufl.dot(grad_c, grad_c) - thres) - softplus(0.0 - thres)
-        ) * self.dx_grad
-        grad_norm_val = self._assemble_scalar_parallel(grad_norm)
-
-        # self.log(f"Traction x = {tx_val:.10f}, Traction y = {ty_val:.10f}")
-        self.log(
-            f"Traction x = {tx_val:.10f}, Traction y = {ty_val:.10f}, grad_norm = {grad_norm_val}"
-        )
-        return ty - tx + grad_norm
+        self.log(f"Traction x = {tx_val:.10f}, Traction y = {ty_val:.10f}")
+        return ty - tx
 
     def _objective_function_value(self):
-        return super()._objective_function_value() + 10
+        return super()._objective_function_value() + 1
 
     def _get_cell_data(self):
         cell_data = super()._get_cell_data()
@@ -94,17 +76,6 @@ class StevenSemisphereDistOpt(StevenNearlyIncompressibleTMCDistOpt):
         return cell_data
 
 
-ckpt = (
-    {
-        1: "outputs/semisphere-2025-11-10-10-47-06-Case1-ckpt/state.bp",
-        2: "outputs/semisphere-2025-11-10-10-46-57-Case2-ckpt/state.bp",
-        3: "outputs/semisphere-2025-11-10-10-46-48-Case3-ckpt/state.bp",
-        4: "outputs/semisphere-2025-11-10-10-41-12-Case4-ckpt/state.bp",
-    }.get(case, load_ckpt)
-    if load_ckpt is None
-    else load_ckpt
-)
-
 case_func = {
     1: lambda x: (-0.7 / 1.5 * x[0]),
     2: lambda x: (-0.5 / 1.5 * x[0] - 0.12),
@@ -112,43 +83,32 @@ case_func = {
     4: lambda x: (-0.1 / 1.5 * x[0] - 0.36),
 }[case]
 
-problem = StevenSemisphereDistOpt(config_path=config_path)
+problem = StevenSemisphereDistOpt(
+    config_path=config_path, override_params={"filter_radius": radius}
+)
 
-if ckpt is None:
-    total_step = 40
-    for i in range(total_step):
-        problem.log(f"Step: {i+1}/{total_step}")
-        problem.params.dirichlet_bcs = [
-            (problem.association_table["bottom"], (0.0, 0.0)),
-            (
-                problem.association_table["top"],
-                {
-                    0: 0.0,
-                    1: (lambda x: case_func(x) * (i + 1) / total_step),
-                },
-            ),
-            (problem.association_table["third_medium_bottom"], {1: 0}),
-        ]
-
-        problem.load_boundary_conditions()
-        problem.forward()
-        problem.save(time=i)
-        problem.record_traction_dirichlet(step=i)
-        problem.save_records()
-
-    problem.save_checkpoint()
-else:
+total_step = 40
+for i in range(total_step):
+    problem.log(f"Step: {i+1}/{total_step}")
     problem.params.dirichlet_bcs = [
         (problem.association_table["bottom"], (0.0, 0.0)),
         (
             problem.association_table["top"],
-            {0: 0.0, 1: case_func},
+            {
+                0: 0.0,
+                1: (lambda x: case_func(x) * (i + 1) / total_step),
+            },
         ),
         (problem.association_table["third_medium_bottom"], {1: 0}),
     ]
+
     problem.load_boundary_conditions()
-    problem.load_functions_from_checkpoint(ckpt)
     problem.forward()
+    problem.save(time=i)
+    problem.record_traction_dirichlet(step=i)
+    problem.save_records()
+
+problem.save_checkpoint()
 
 problem.vtu_dir = os.path.join(problem.path, "vtu_opt")
 problem.pvd_file = os.path.join(problem.path, "output_opt.pvd")

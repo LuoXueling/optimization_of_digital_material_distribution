@@ -20,7 +20,9 @@ parser.add_argument("--ccsamma_rel_tolerance", type=float, default=1e-5)
 parser.add_argument("--plane_strain", action="store_true")
 parser.add_argument("--disable_rho", action="store_true")
 parser.add_argument("--disable_c", action="store_true")
-parser.add_argument("--max_penalty", type=float, default=6.0)
+parser.add_argument("--max_penalty", type=float, default=5.0)
+parser.add_argument("--target_volume", type=float, default=0.35)
+parser.add_argument("--I1_rhs", type=float, default=0.25)
 parser.add_argument("--n_filters", type=int, default=0)
 args = parser.parse_args()
 
@@ -108,7 +110,7 @@ class StevenTopoOpt(NeoHookeanPDEFilteredTopoOpt):
         raw_density = (
             self.e if self.n_component == 1 else self.e[self.density_component_id]
         )
-        beta = 8.0
+        beta = 2**self.penalty
         eta = 0.5
         num = ufl.tanh(beta * eta) + ufl.tanh(beta * (raw_density - eta))
         den = ufl.tanh(beta * eta) + ufl.tanh(beta * (1.0 - eta))
@@ -160,7 +162,7 @@ class StevenTopoOptI1(StevenTopoOpt):
         # which makes it an independent variable in the eyes of symbolic differentiation.
         # scalar_space = fem.functionspace(self.mesh, ("CG", 1))
         # density = project(self.density, scalar_space, "isolated_density")
-        safety_factor = 15
+        safety_factor = 10
         I_1_diff = self.density ** (1 / self.penalty) * (I1 - 3) * safety_factor - (
             I1_crit - 3
         )
@@ -180,7 +182,7 @@ class StevenTopoOptI1(StevenTopoOpt):
         )
 
     def _constraints_rhs(self):
-        return [0.0, 0.05]
+        return [0.0, args.I1_rhs]
 
     def _constraints(self):
         volume = (self.density - self.params.target_volume) / self.area * self.dx
@@ -267,7 +269,7 @@ class StevenDistTopoOptI1(StevenDistTopoOpt):
         return [volume, I_1]
 
     def _constraints_rhs(self):
-        return [0.0, 0.05]
+        return [0.0, args.I1_rhs]
 
 
 problem = {
@@ -282,9 +284,6 @@ if args.disable_rho or args.disable_c:
     problem.params.design_fields_disabled = ([0] if args.disable_rho else []) + (
         [1] if args.disable_c else []
     )
-
-if args.disable_rho:
-    problem.params.init_penalty = args.max_penalty
 
 problem.params["max_penalty"] = args.max_penalty
 problem.params["optimizer"] = args.optimizer

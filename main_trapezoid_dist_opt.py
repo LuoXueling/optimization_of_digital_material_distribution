@@ -13,11 +13,9 @@ from src.utils import project
 parser = ArgumentParser()
 parser.add_argument("-c", "--config", type=str, default="./mesh/config_trapezoid.py")
 parser.add_argument("--radius", type=float, default=0.05)
-parser.add_argument("--mma", action="store_true")
 
 args = parser.parse_args()
 config_path = args.config
-# thres = args.thres
 radius = args.radius
 
 
@@ -48,23 +46,7 @@ class StevenTrapezoidDistOpt(StevenNearlyIncompressibleDistOpt):
         tx_val = self._assemble_scalar_parallel(tx)
         ty_val = self._assemble_scalar_parallel(ty)
 
-        # c = self._get_c()
-        # grad_c = ufl.grad(c)
-        # smooth = thres / 10
-        # softplus = lambda x: ufl.conditional(
-        #     ufl.lt(x, thres * 10),
-        #     ufl.ln(1 + ufl.exp(x / smooth)) * smooth,
-        #     x,
-        # )
-        # grad_norm = (
-        #     softplus(ufl.dot(grad_c, grad_c) - thres) - softplus(0.0 - thres)
-        # ) * self.dx_grad
-        # grad_norm_val = self._assemble_scalar_parallel(grad_norm)
-
         self.log(f"Traction x = {tx_val:.10f}, Traction y = {ty_val:.10f}")
-        # self.log(
-        #     f"Traction x = {tx_val:.10f}, Traction y = {ty_val:.10f}, grad_norm = {grad_norm_val}"
-        # )
         return ty - tx
 
     def _objective_function_value(self):
@@ -83,9 +65,6 @@ class StevenTrapezoidDistOpt(StevenNearlyIncompressibleDistOpt):
 problem = StevenTrapezoidDistOpt(
     config_path=config_path, override_params={"filter_radius": radius}
 )
-
-if args.mma:
-    problem.params.optimizer = "MMA"
 
 problem.optimize()
 problem.save_checkpoint()
