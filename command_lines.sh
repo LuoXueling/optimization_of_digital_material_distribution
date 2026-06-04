@@ -2,6 +2,8 @@ export OMP_NUM_THREADS=1 && mpirun -n 8 python main_trapezoid_dist_opt.py --radi
 export OMP_NUM_THREADS=1 && mpirun -n 8 python main_trapezoid_dist_opt.py --radius 0.03
 export OMP_NUM_THREADS=1 && mpirun -n 8 python main_trapezoid_dist_opt.py --radius 0.01
 
+export OMP_NUM_THREADS=1 && mpirun -n 8 python main_trapezoid_dist_opt.py --radius 0.03 --load outputs/trapezoid-2026-04-13-16-18-42/state.bp
+
 export OMP_NUM_THREADS=1 && mpirun -n 16 python main_semisphere_dist_opt_tmc.py --case 1 --radius 0.05
 export OMP_NUM_THREADS=1 && mpirun -n 16 python main_semisphere_dist_opt_tmc.py --case 2 --radius 0.05
 export OMP_NUM_THREADS=1 && mpirun -n 16 python main_semisphere_dist_opt_tmc.py --case 3 --radius 0.05
