@@ -9,10 +9,10 @@ import pandas as pd
 import numpy as np
 from src.utils import project
 
-
 parser = ArgumentParser()
 parser.add_argument("-c", "--config", type=str, default="./mesh/config_trapezoid.py")
 parser.add_argument("--radius", type=float, default=0.05)
+parser.add_argument("-l", "--load", type=str, default=None)
 
 args = parser.parse_args()
 config_path = args.config
@@ -65,6 +65,24 @@ class StevenTrapezoidDistOpt(StevenNearlyIncompressibleDistOpt):
 problem = StevenTrapezoidDistOpt(
     config_path=config_path, override_params={"filter_radius": radius}
 )
-
-problem.optimize()
-problem.save_checkpoint()
+if args.load is None:
+    problem.optimize()
+    problem.save_checkpoint()
+else:
+    problem.load_functions_from_checkpoint(args.load)
+    problem.forward()
+    total_step = 30
+    for i in range(total_step):
+        problem.log(f"Step: {i+1}/{total_step}")
+        problem.params.dirichlet_bcs = [
+            (problem.association_table["bottom"], (0.0, 0.0)),
+            (
+                problem.association_table["top"],
+                {1: -0.3 * (i + 1) / total_step},
+            ),
+        ]
+        problem.load_boundary_conditions()
+        problem.forward()
+        problem.save(time=i)
+        problem.record_traction_dirichlet(step=i)
+        problem.save_records()

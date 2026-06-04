@@ -145,14 +145,6 @@ class StevenTopoOptI1(StevenTopoOpt):
             x,
         )
 
-        # thres = 0.01
-        # sharpness = 1000
-        # heaviside = lambda x: (
-        #     np.tanh(sharpness * thres) + np.tanh(sharpness * (x - thres))
-        # ) / (np.tanh(sharpness * thres) + np.tanh(sharpness * (1 - thres)))
-        heaviside = lambda x: 0.0 if x < 0 else 1.0
-        heaviside_ufl = lambda x: ufl.conditional(ufl.lt(x, 0.0), 0.0, 1.0)
-
         # We only want to compute I1-based failure criterion in regions with high density,
         # so supposedly we should multiply softplus(xxx) by self.density.
         # However, the symbolic differentiation of self.density*softplus(xxx)
@@ -217,35 +209,6 @@ class StevenDistTopoOpt(StevenTopoOpt):
         for idx in self._c_map:
             bnds[idx] = (0.0, 1.0)
         return bnds
-
-    # def _objective_function(self):
-    #     energy_objective = -self._normalized_scalar_expression(
-    #         self._degradation
-    #         * StevenNearlyIncompressible._strain_energy_density(self)
-    #         * self.dx,
-    #         "stored_energy",
-    #     )
-    #     energy_objective_val = self._assemble_scalar_parallel(energy_objective)
-
-    #     thres = 250
-    #     smooth = thres / 10
-    #     softplus = lambda x: ufl.conditional(
-    #         ufl.lt(x, thres * 10),
-    #         ufl.ln(1 + ufl.exp(x / smooth)) * smooth,
-    #         x,
-    #     )
-    #     c = self._get_c()
-    #     grad_c = ufl.grad(c)
-    #     grad_norm = (
-    #         self._degradation
-    #         / 10
-    #         * (softplus(ufl.dot(grad_c, grad_c) - thres) - softplus(0.0 - thres))
-    #         * self.dx_grad
-    #     )
-
-    #     grad_norm_val = self._assemble_scalar_parallel(grad_norm)
-    #     self.log(f"Energy = {energy_objective_val}, grad_norm = {grad_norm_val}")
-    #     return energy_objective + grad_norm
 
     def _constraints(self):
         volume = (self.density - self.params.target_volume) / self.area * self.dx
