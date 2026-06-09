@@ -7,7 +7,7 @@ import dolfinx.io as io
 from dolfinx.la import InsertMode
 import ufl
 from src.default_config import params
-from src.solvers import solve_nonlinear_problem
+from src.solvers import solve_nonlinear_problem, solve_linear_problem
 import os
 import importlib
 import shutil
@@ -18,12 +18,15 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pickle
 import pandas as pd
+import gc
 
 
 class NeoHookean:
-    def __init__(self, config_path, override_params=None):
+    def __init__(self, config_path=None, override_params=None):
         # Load parameters
-        params_updated = importlib.import_module(config_path.strip(".py")).params
+        params_updated = importlib.import_module(
+            config_path.replace("./", "").removesuffix(".py").replace("/", ".")
+        ).params
         self.params = params.copy()
         self.params.update(params_updated)
         if override_params is not None:
@@ -40,6 +43,7 @@ class NeoHookean:
             os.makedirs(self.vtu_dir, exist_ok=True)
             shutil.copy2(config_path, os.path.join(self.path, "config.py"))
         self.pvd_file = os.path.join(self.path, "output.pvd")
+        self.record_file = os.path.join(self.path, "records.csv")
         self.timesteps = []
         self.log = partial(
             log,
@@ -66,15 +70,19 @@ class NeoHookean:
         # Create mesh
         self.mesh = self.params.mesh
 
-        local_area = fem.assemble_scalar(
-            fem.form(
-                1.0
-                * ufl.dx(
-                    metadata={"quadrature_degree": self.params.q_deg}, domain=self.mesh
-                )
+        self.area = self._assemble_scalar_parallel(
+            1.0
+            * self.dx(
+                metadata={"quadrature_degree": self.params.q_deg}, domain=self.mesh
             )
         )
-        self.area = self.mesh.comm.allreduce(local_area, op=MPI.SUM)
+
+        self.B = fem.Constant(
+            self.mesh,
+            ScalarType(
+                self.params.B if self.params.B is not None else (0.0,) * self.params.dim
+            ),
+        )
 
         # define function space
         self.V_u = fem.functionspace(
@@ -87,11 +95,19 @@ class NeoHookean:
         self.u = fem.Function(
             self.V_u, name="displacement"
         )  # fields from previous iteration
+        # self.residual = fem.Function(self.V_u, name="residual")
 
-        # Defined optimized variable
-        self.V_e = fem.functionspace(
-            self.mesh, ("Lagrange", self.params.elem_order)
-        )  # For the optimized variable
+        # Defined optimized variable (allow multi-component via n_component)
+        if self.n_component == 1:
+            self.V_e = fem.functionspace(
+                self.mesh, ("Lagrange", 1)
+            )  # scalar design variable
+        else:
+            self.V_e = fem.functionspace(
+                self.mesh, ("Lagrange", 1, (self.n_component,))
+            )  # vector-valued design variable
+        self.raw_e = fem.Function(self.V_e, name="Raw")
+        self.raw_e.x.array[:] = 1.0
         self.e = fem.Function(self.V_e, name="Optimized")
         self.e.x.array[:] = 1.0
         self.gradient = fem.Function(self.V_e, name="Gradient")
@@ -102,15 +118,246 @@ class NeoHookean:
 
         self.load_boundary_conditions()
 
+        self.log(f"Association table: {self.association_table}")
+
         # Initialize optimization related variables
         self._optimize_step = 0
         self._loss_history = []
         self._stage_loss_history = []
+        self._initial_objective_values = {}
 
         self.optimized = False
 
+        if self.params.filter_radius is not None:
+            self._filter_vars = {}
+            for i in range(self.n_component):
+                if self.n_component == 1:
+                    V, m = self.V_e, None
+                else:
+                    V, m = self.V_e.sub(i).collapse()
+                self._filter_vars[i] = {
+                    "V": V,
+                    "map": m,
+                    "raw": fem.Function(V, name=f"Raw {i}"),
+                    "filt": fem.Function(V, name=f"Filtered {i}"),
+                }
+                self._setup_filter(component_id=i)
+
         self.records = pd.DataFrame()
         self.records.index.name = "Step"
+        self._cache = {}  # Cache for reusable objects
+
+    def _normalized_scalar_expression(self, expression, name, ref_value=None):
+        if name not in self._initial_objective_values.keys():
+            self._initial_objective_values[name] = (
+                self._assemble_scalar_parallel(expression)
+                if ref_value is None
+                else ref_value
+            )
+        normalized_scalar = 1 / self._initial_objective_values[name] * expression
+        return normalized_scalar
+
+    def _setup_filter(self, component_id):
+        rf = self.params.filter_radius
+        if isinstance(rf, list) or isinstance(rf, tuple):
+            rf = rf[component_id]
+        if rf is None:
+            self.log(
+                f"No filter applied for component {component_id} since filter_radius is None"
+            )
+            return
+        self.log(f"Initialize PDE filter for component {component_id} with radius {rf}")
+        u = ufl.TrialFunction(self._filter_vars[component_id]["V"])
+        _filter_v = ufl.TestFunction(self._filter_vars[component_id]["V"])
+        dx = ufl.dx(metadata={"quadrature_degree": self.params.q_deg})
+        a = u * _filter_v * dx + rf**2 * ufl.dot(ufl.grad(u), ufl.grad(_filter_v)) * dx
+        _filter_a = fem.form(a)
+        A = fem.petsc.assemble_matrix(_filter_a)
+        A.assemble()
+        _filter_mat = A
+        # Explicit mass matrix M (=u*v*dx), reused to apply the filter transpose
+        # M*K^-1 in the gradient path (the discrete adjoint of the forward
+        # filter K^-1*M).
+        _mass_form = fem.form(u * _filter_v * dx)
+        M = fem.petsc.assemble_matrix(_mass_form)
+        M.assemble()
+        _mass_mat = M
+        _phi_tmp = fem.Function(
+            self._filter_vars[component_id]["V"], name="DesignInput"
+        )
+        _filter_rhs_form = fem.form(_phi_tmp * _filter_v * dx)
+        _filter_rhs = fem.petsc.create_vector(_filter_rhs_form)
+        _filter_solution = fem.Function(
+            self._filter_vars[component_id]["V"], name="FilterSolution"
+        )
+
+        self._filter_vars[component_id].update(
+            {
+                "a": _filter_a,
+                "mat": _filter_mat,
+                "mass_mat": _mass_mat,
+                "phi_tmp": _phi_tmp,
+                "rhs_form": _filter_rhs_form,
+                "rhs": _filter_rhs,
+                "solution": _filter_solution,
+            }
+        )
+
+    def _apply_filter(self, phi_array, component_id, clip=True):
+        # Applies Helmholtz PDE filtering
+        rf = self.params.filter_radius
+        if isinstance(rf, list) or isinstance(rf, tuple):
+            rf = rf[component_id]
+        if rf is None:
+            self.log(
+                f"No filter applied for component {component_id} since filter_radius is None"
+            )
+            return phi_array
+        self.log(f"Applying filter")
+        m = self._filter_vars[component_id]["map"]
+        if m is None:
+            src = phi_array
+        else:
+            src = phi_array[m]
+        n_local = self._filter_vars[component_id]["V"].dofmap.index_map.size_local
+        self._filter_vars[component_id]["phi_tmp"].x.array[:n_local] = src[:n_local]
+        self._filter_vars[component_id]["phi_tmp"].x.scatter_forward()
+        with self._filter_vars[component_id]["rhs"].localForm() as loc:
+            loc.set(0.0)
+        fem.petsc.assemble_vector(
+            self._filter_vars[component_id]["rhs"],
+            self._filter_vars[component_id]["rhs_form"],
+        )
+        self._filter_vars[component_id]["rhs"].ghostUpdate(
+            addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE
+        )
+        solve_linear_problem(
+            self._filter_vars[component_id]["a"],
+            self._filter_vars[component_id]["rhs_form"],
+            self._filter_vars[component_id]["solution"],
+            bcs=[],
+            linear_solver="mumps",
+            comm=self.mesh.comm,
+            A_cache=self._filter_vars[component_id]["mat"],
+            b_cache=self._filter_vars[component_id]["rhs"],
+            logger=self.log,
+        )
+        filt_local = self._filter_vars[component_id]["solution"].x.array
+        if clip:
+            bounds = np.array(self._bounds())
+            if m is None:
+                filt_local = np.clip(filt_local, bounds[:, 0], bounds[:, 1])
+            else:
+                filt_local = np.clip(filt_local, bounds[m, 0], bounds[m, 1])
+        if m is None:
+            return filt_local.copy()
+        else:
+            full = phi_array.copy()
+            full[m] = filt_local
+            return full
+
+    def _filter_all(self, x, clip=True):
+        for comp_id in range(self.n_component):
+            x = self._apply_filter(x, component_id=comp_id, clip=clip)
+        return x
+
+    def _apply_filter_adjoint(self, g_array, component_id):
+        """Apply the transpose of the forward filter to a sensitivity vector.
+
+        The forward filter is F = K^-1 M (see ``_apply_filter``). Its discrete
+        adjoint, required by the chain rule for the gradient, is
+        F^T = M^T K^-T = M K^-1 (K, M symmetric). This routine therefore solves
+        K w = g (with g used directly as the RHS vector, *without* the mass
+        multiply) and then returns M w.
+        """
+        rf = self.params.filter_radius
+        if isinstance(rf, list) or isinstance(rf, tuple):
+            rf = rf[component_id]
+        if rf is None:
+            self.log(
+                f"No filter applied for component {component_id} since filter_radius is None"
+            )
+            return g_array
+        self.log(f"Applying filter adjoint")
+        m = self._filter_vars[component_id]["map"]
+        if m is None:
+            src = g_array
+        else:
+            src = g_array[m]
+        n_local = self._filter_vars[component_id]["V"].dofmap.index_map.size_local
+
+        # Build the raw RHS vector b = g (no mass-matrix multiply)
+        with self._filter_vars[component_id]["rhs"].localForm() as loc:
+            loc.set(0.0)
+        self._filter_vars[component_id]["rhs"].array[:n_local] = src[:n_local]
+        self._filter_vars[component_id]["rhs"].ghostUpdate(
+            addv=PETSc.InsertMode.INSERT, mode=PETSc.ScatterMode.FORWARD
+        )
+
+        # Solve K w = g
+        solve_linear_problem(
+            self._filter_vars[component_id]["a"],
+            self._filter_vars[component_id]["rhs_form"],
+            self._filter_vars[component_id]["solution"],
+            bcs=[],
+            linear_solver="mumps",
+            comm=self.mesh.comm,
+            A_cache=self._filter_vars[component_id]["mat"],
+            b_cache=self._filter_vars[component_id]["rhs"],
+            logger=self.log,
+        )
+
+        # Multiply by the mass matrix: out = M w. The matrix-vector product
+        # yields correct values on owned dofs; route them through the cached
+        # Function and scatter_forward so ghost dofs are made consistent before
+        # we read the local array.
+        w_vec = self._filter_vars[component_id]["solution"].x.petsc_vec
+        out_vec = w_vec.duplicate()
+        self._filter_vars[component_id]["mass_mat"].mult(w_vec, out_vec)
+        self._filter_vars[component_id]["phi_tmp"].x.array[:n_local] = out_vec.array[
+            :n_local
+        ]
+        self._filter_vars[component_id]["phi_tmp"].x.scatter_forward()
+        out_local = self._filter_vars[component_id]["phi_tmp"].x.array
+        if m is None:
+            result = out_local.copy()
+        else:
+            result = g_array.copy()
+            result[m] = out_local
+        out_vec.destroy()
+        return result
+
+    def _filter_all_adjoint(self, g):
+        for comp_id in range(self.n_component):
+            g = self._apply_filter_adjoint(g, component_id=comp_id)
+        return g
+
+    def save_checkpoint(self, filename: str | None = None):
+        try:
+            import adios4dolfinx as a4d
+        except Exception as e:
+            raise RuntimeError("adios4dolfinx is required to save checkpoint") from e
+
+        filename = os.path.join(self.path, "state.bp" if filename is None else filename)
+
+        for name, val in sorted(self.__dict__.items()):
+            if isinstance(val, fem.Function):
+                a4d.write_function_on_input_mesh(filename, val, engine="BP4", name=name)
+
+        self.log(f"Checkpoint saved at {filename}")
+
+    def load_functions_from_checkpoint(self, checkpoint_dir):
+        import adios4dolfinx as a4d
+
+        for name, val in sorted(self.__dict__.items()):
+            if isinstance(val, fem.Function):
+                try:
+                    a4d.read_function(checkpoint_dir, val, engine="BP4", name=name)
+                    self.log(f"Loaded function {name} from checkpoint.")
+                except:
+                    self.log(f"Failed to load function {name} from checkpoint.")
+
+        self.log(f"Loaded checkpoint from {checkpoint_dir}")
 
     def _initialize_fields(self):
         self.u = fem.Function(self.V_u, name="displacement")
@@ -143,9 +390,22 @@ class NeoHookean:
             if self.params.association_table is not None
             else {}
         )
-        self.neumann_bcs = (
+        self.neumann_bcs = []
+        # Check if V_u is a subspace (from mixed space) by trying to collapse
+        try:
+            V_u_collapsed, _ = self.V_u.collapse()
+        except RuntimeError:
+            V_u_collapsed = self.V_u
+        for marker_id, val in (
             self.params.neumann_bcs if self.params.neumann_bcs is not None else []
-        )
+        ):
+            if callable(val) and not isinstance(val, (fem.Constant, fem.Expression)):
+                # Convert function to fem.Function
+                neumann_func = fem.Function(V_u_collapsed)
+                neumann_func.interpolate(val)
+                self.neumann_bcs.append((marker_id, neumann_func))
+            else:
+                self.neumann_bcs.append((marker_id, val))
 
         # For geometrically defined boundaries, create MeshTags
         self.mesh.topology.create_connectivity(
@@ -184,40 +444,61 @@ class NeoHookean:
 
         # Process all geometrically-defined BCs uniformly
         for marker_func, val, bc_type, i in bc_list:
-            # Find a unique marker ID
-            marker_id = 1
-            while marker_id in self.association_table.values():
-                marker_id += 1
+            if f"Config {bc_type} BC {i}" in self.association_table.keys():
+                marker_id = self.association_table[f"Config {bc_type} BC {i}"]
+            else:
+                # Find a unique marker ID
+                marker_id = 1
+                while marker_id in self.association_table.values():
+                    marker_id += 1
 
-            # Store in association table
-            self.association_table[f"Config {bc_type} BC {i}"] = marker_id
+                # Store in association table
+                self.association_table[f"Config {bc_type} BC {i}"] = marker_id
 
             # Locate boundary facets
             facets = dmesh.locate_entities_boundary(
                 self.mesh, self.mesh.topology.dim - 1, marker_func
             )
 
-            # Add to neumann_bcs list if Neumann
+            # Add to neumann_bcs list directly if Neumann
             if bc_type == "Neumann":
-                self.neumann_bcs.append((marker_id, val))
-
-            if len(facets) > 0:
-                # Update boundaries MeshTags
-                values = np.full(len(facets), marker_id, dtype=np.int32)
-                if self.boundaries.indices.size == 0:
-                    self.boundaries = dmesh.meshtags(
-                        self.mesh, self.mesh.topology.dim - 1, facets, values
-                    )
+                # Check if val is callable (a function of coordinates)
+                if callable(val) and not isinstance(
+                    val, (fem.Constant, fem.Expression)
+                ):
+                    # Convert function to fem.Function
+                    try:
+                        neumann_func = fem.Function(self.V_u)
+                        neumann_func.interpolate(val)
+                    except:
+                        # If it doesn't work, it's a scalar and represents pressure
+                        neumann_func = fem.Function(
+                            fem.functionspace(
+                                self.mesh, ("Lagrange", self.params.elem_order)
+                            )
+                        )
+                        neumann_func.interpolate(val)
+                    self.neumann_bcs.append((marker_id, neumann_func))
                 else:
-                    all_indices = np.concatenate([self.boundaries.indices, facets])
-                    all_values = np.concatenate([self.boundaries.values, values])
-                    self.boundaries = dmesh.meshtags(
-                        self.mesh, self.mesh.topology.dim - 1, all_indices, all_values
-                    )
+                    if isinstance(val, (tuple, int, float)):
+                        val = fem.Constant(self.mesh, ScalarType(val))
+                    self.neumann_bcs.append((marker_id, val))
+
+            # Update boundaries MeshTags
+            values = np.full(len(facets), marker_id, dtype=np.int32)
+            if self.boundaries.indices.size == 0:
+                self.boundaries = dmesh.meshtags(
+                    self.mesh, self.mesh.topology.dim - 1, facets, values
+                )
+            else:
+                all_indices = np.concatenate([self.boundaries.indices, facets])
+                all_values = np.concatenate([self.boundaries.values, values])
+                self.boundaries = dmesh.meshtags(
+                    self.mesh, self.mesh.topology.dim - 1, all_indices, all_values
+                )
 
         self.dirichlet_bcs = self._define_dirichlet_boundaries()
-
-        self.log(f"Association table: {self.association_table}")
+        self.adjoint_bcs = self._define_dirichlet_boundaries(fixed_value=0.0)
 
         self.boundary_ds = ufl.ds(
             metadata={"quadrature_degree": self.params.q_deg},
@@ -227,11 +508,46 @@ class NeoHookean:
 
         for i, val in self.neumann_bcs:
             forces = []
-            for x in val:
-                local_force = fem.assemble_scalar(fem.form(x * self.boundary_ds(i)))
-                global_force = self.mesh.comm.allreduce(local_force, op=MPI.SUM)
-                forces.append(global_force)
+            N = ufl.FacetNormal(self.mesh)
+            # Check if val is a fem.Function (spatially-varying) or has iterable components
+            if isinstance(val, fem.Function):
+                # For fem.Function, compute integral of each component
+                if val.function_space.value_size == 1:
+                    # For scalars, it's pressure load, and we are using reference configuration just for this functionality
+                    val = val * N
+                for comp in range(self.mesh.geometry.dim):
+                    global_force = self._assemble_scalar_parallel(
+                        val[comp] * self.boundary_ds(i)
+                    )
+                    forces.append(global_force)
+            else:
+                if val.value.size == 1:
+                    # For scalars, it's pressure load, and we are using reference configuration just for this functionality
+                    val = val * N
+                # For Constant or similar, iterate over components
+                for x in val:
+                    global_force = self._assemble_scalar_parallel(
+                        x * self.boundary_ds(i)
+                    )
+                    forces.append(global_force)
             self.log(f"Applying Neumann boundary {i}: {forces}")
+
+        # Create domain meshtags for subdomain integration
+        self.domains = self._create_domain_meshtags()
+        self.domain_dx = ufl.dx(
+            metadata={"quadrature_degree": self.params.q_deg},
+            domain=self.mesh,
+            subdomain_data=self.domains,
+        )
+
+        self.e_dirichlet_bcs, self.gradient_dirichlet_bcs = (
+            self._define_design_dirichlet_boundaries()
+        )
+        self._apply_design_bcs()
+
+    def _assemble_scalar_parallel(self, expression):
+        local_val = fem.assemble_scalar(fem.form(expression))
+        return self.mesh.comm.allreduce(local_val, op=MPI.SUM)
 
     def _define_dirichlet_boundaries(self, fixed_value=None):
         dirichlet_bcs = []
@@ -265,8 +581,12 @@ class NeoHookean:
             bc_list.extend(self.params.dirichlet_bcs)
 
         # Process all BCs uniformly
+        marker_facets_num = {}
         for marker_id, val in bc_list:
             facets = self.boundaries.find(marker_id)
+            marker_facets_num[marker_id] = self.mesh.comm.allreduce(
+                len(facets), op=MPI.SUM
+            )
 
             # Check if val is a dict (component-wise BC) or Constant (all components)
             if isinstance(val, dict):
@@ -279,10 +599,16 @@ class NeoHookean:
 
                     bc_func = fem.Function(V_component)
                     if fixed_value is not None:
-                        bc_func.x.array[:] = 0.0
+                        bc_func.x.array[:] = fixed_value
                     else:
+                        # Check if component_val is a Constant or Expression first
                         if hasattr(component_val, "value"):
                             bc_func.x.array[:] = component_val.value
+                        elif callable(component_val) and not isinstance(
+                            component_val, (fem.Constant, fem.Expression)
+                        ):
+                            # Function of coordinates
+                            bc_func.interpolate(component_val)
                         else:
                             bc_func.x.array[:] = component_val
 
@@ -308,11 +634,24 @@ class NeoHookean:
                     # For subspaces, use Function instead of Constant
                     bc_func = fem.Function(V_u_collapsed)
                     if fixed_value is not None:
-                        bc_func.x.array[:] = 0.0
+                        bc_func.x.array[:] = fixed_value
                     else:
-                        bc_func.interpolate(
-                            lambda x: np.tile(val.value, (x.shape[1], 1)).T
-                        )
+                        # Check if val is a Constant or Expression first
+                        if hasattr(val, "value"):
+                            bc_func.interpolate(
+                                lambda x: np.tile(val.value, (x.shape[1], 1)).T
+                            )
+                        elif callable(val) and not isinstance(
+                            val, (fem.Constant, fem.Expression)
+                        ):
+                            # Function of coordinates
+                            bc_func.interpolate(val)
+                        else:
+                            if isinstance(val, tuple):
+                                val = fem.Constant(self.mesh, ScalarType(val))
+                            bc_func.interpolate(
+                                lambda x: np.tile(val.value, (x.shape[1], 1)).T
+                            )
 
                     dofs = fem.locate_dofs_topological(
                         (self.V_u, V_u_collapsed), self.mesh.topology.dim - 1, facets
@@ -321,24 +660,266 @@ class NeoHookean:
                         bc = fem.dirichletbc(bc_func, dofs, self.V_u)
                         dirichlet_bcs.append(bc)
                 else:
-                    # For regular spaces, use Constant
+                    # For regular spaces
                     if fixed_value is not None:
                         bc_val = fem.Constant(
-                            self.mesh, ScalarType([0.0] * self.mesh.geometry.dim)
+                            self.mesh,
+                            ScalarType([fixed_value] * self.mesh.geometry.dim),
                         )
+                        dofs = fem.locate_dofs_topological(
+                            self.V_u, self.mesh.topology.dim - 1, facets
+                        )
+                        if len(facets) > 0:
+                            bc = fem.dirichletbc(bc_val, dofs, self.V_u)
+                            dirichlet_bcs.append(bc)
+                    elif callable(val) and not isinstance(
+                        val, (fem.Constant, fem.Expression)
+                    ):
+                        # Function-based BC: create a Function and interpolate
+                        bc_func = fem.Function(self.V_u)
+                        bc_func.interpolate(val)
+                        dofs = fem.locate_dofs_topological(
+                            self.V_u, self.mesh.topology.dim - 1, facets
+                        )
+                        if len(facets) > 0:
+                            bc = fem.dirichletbc(bc_func, dofs)
+                            dirichlet_bcs.append(bc)
                     else:
+                        # Constant value (fem.Constant or similar)
+                        if isinstance(val, tuple):
+                            val = fem.Constant(self.mesh, ScalarType(val))
                         bc_val = val
-
-                    dofs = fem.locate_dofs_topological(
-                        self.V_u, self.mesh.topology.dim - 1, facets
-                    )
-                    if len(facets) > 0:
-                        bc = fem.dirichletbc(bc_val, dofs, self.V_u)
-                        dirichlet_bcs.append(bc)
-
+                        dofs = fem.locate_dofs_topological(
+                            self.V_u, self.mesh.topology.dim - 1, facets
+                        )
+                        if len(facets) > 0:
+                            bc = fem.dirichletbc(bc_val, dofs, self.V_u)
+                            dirichlet_bcs.append(bc)
+        self.log(f"Found facets for Dirichlet BCs: {marker_facets_num}")
         return dirichlet_bcs
 
-    def forward(self):
+    def _define_domain_dirichlet_constraints(
+        self, function_space, domain_marker, fixed_value=0.0
+    ):
+        """
+        Define Dirichlet constraints for a field within a specified domain (volumetric region).
+
+        This method is analogous to _define_dirichlet_boundaries() but works on cells (domains)
+        instead of facets (boundaries). It can handle both regular function spaces and subspaces
+        from mixed formulations.
+
+        Args:
+            function_space: The function space to constrain (can be a subspace from mixed element)
+            domain_marker: Integer marker ID identifying the domain cells
+            fixed_value: The value to constrain the field to (scalar or appropriate for the space)
+
+        Returns:
+            List of fem.dirichletbc objects for the specified field
+        """
+        domain_dirichlet_bcs = []
+
+        # Check if function_space is a subspace (from mixed space) by trying to collapse
+        try:
+            V_collapsed, _ = function_space.collapse()
+            is_subspace = True
+        except RuntimeError:
+            is_subspace = False
+            V_collapsed = function_space
+
+        # Ensure topology connectivity for cells
+        self.mesh.topology.create_connectivity(
+            self.mesh.topology.dim, self.mesh.topology.dim
+        )
+
+        # Find cells with the specified domain marker
+        cells = self.domains.find(domain_marker)
+
+        num_cells = self.mesh.comm.allreduce(len(cells), op=MPI.SUM)
+        self.log(
+            f"Constraining field in {num_cells} cells with domain marker {domain_marker}"
+        )
+
+        # Create a function with the fixed value (always available)
+        bc_func = fem.Function(V_collapsed)
+        bc_func.x.array[:] = fixed_value
+
+        # Locate DOFs collectively on all ranks, even if cells is empty locally
+        if is_subspace:
+            dofs = fem.locate_dofs_topological(
+                (function_space, V_collapsed), self.mesh.topology.dim, cells
+            )
+            if len(cells) > 0:
+                try:
+                    bc = fem.dirichletbc(bc_func, dofs, function_space)
+                except:
+                    bc = fem.dirichletbc(bc_func, dofs)
+                domain_dirichlet_bcs.append(bc)
+        else:
+            dofs = fem.locate_dofs_topological(
+                function_space, self.mesh.topology.dim, cells
+            )
+            if len(cells) > 0:
+                bc = fem.dirichletbc(bc_func, dofs)
+                domain_dirichlet_bcs.append(bc)
+
+        return domain_dirichlet_bcs
+
+    def _define_design_dirichlet_boundaries(
+        self, function_space=None, fixed_value=None
+    ):
+        """
+        Define dirichlet BCs for self.e and gradient of self.e
+        """
+        function_space = self.V_e if function_space is None else function_space
+
+        e_bcs = []
+        gradient_bcs = []
+        fix_design_domain = self.params.fix_design_domain
+        if fix_design_domain is not None:
+            # Probably we want the fixed domain unaltered instead of a 1.0
+            if fixed_value is not None:
+                e_bcs.extend(
+                    self._define_domain_dirichlet_constraints(
+                        function_space=function_space,
+                        domain_marker=self.association_table[fix_design_domain],
+                        fixed_value=fixed_value,
+                    )
+                )
+            gradient_bcs.extend(
+                self._define_domain_dirichlet_constraints(
+                    function_space=function_space,
+                    domain_marker=self.association_table[fix_design_domain],
+                    fixed_value=0.0,
+                )
+            )
+        return e_bcs, gradient_bcs
+
+    def _apply_design_bcs(self):
+        fem.set_bc(self.e.x.array, self.e_dirichlet_bcs)
+        self.e.x.scatter_forward()
+
+    def _create_domain_meshtags(self):
+        """Create cell-based MeshTags for domain integration.
+
+        Processes domain_dict to mark cells based on lambda functions and merges
+        with GMSH-imported cell tags if available.
+
+        Returns:
+            dolfinx.mesh.MeshTags: Cell-based meshtags for domains
+        """
+        # Ensure topology connectivity is created
+        self.mesh.topology.create_connectivity(
+            self.mesh.topology.dim, self.mesh.topology.dim
+        )
+
+        # Start with GMSH-imported cell tags if available
+        if self.params.cell_tags is not None:
+            # Extract existing cell tags from GMSH
+            existing_indices = self.params.cell_tags.indices
+            existing_values = self.params.cell_tags.values
+        else:
+            # Create empty arrays
+            existing_indices = np.array([], dtype=np.int32)
+            existing_values = np.array([], dtype=np.int32)
+
+        # Process domain_dict for geometrically-defined domains
+        if self.params.domain_dict is not None:
+            for i, (marker_func, domain_name) in enumerate(
+                self.params.domain_dict.items()
+            ):
+                # Determine marker ID
+                marker_key = (
+                    f"Config Domain {i}" if domain_name is None else domain_name
+                )
+
+                if marker_key in self.association_table.keys():
+                    marker_id = self.association_table[marker_key]
+                else:
+                    # Find a unique marker ID
+                    marker_id = 1
+                    while marker_id in self.association_table.values():
+                        marker_id += 1
+
+                    # Store in association table
+                    self.association_table[marker_key] = marker_id
+
+                # Locate cells matching the marker function
+                cells = dmesh.locate_entities(
+                    self.mesh, self.mesh.topology.dim, marker_func
+                )
+
+                # Add to existing arrays
+                values = np.full(len(cells), marker_id, dtype=np.int32)
+                existing_indices = np.concatenate([existing_indices, cells])
+                existing_values = np.concatenate([existing_values, values])
+
+                # Log the number of cells marked
+                num_cells_global = self.mesh.comm.allreduce(len(cells), op=MPI.SUM)
+                if num_cells_global > 0:
+                    self.log(
+                        f"Marked {num_cells_global} cells for domain '{marker_key}' with ID {marker_id}"
+                    )
+
+        # Find all cells that are not marked
+        num_cells_local = self.mesh.topology.index_map(
+            self.mesh.topology.dim
+        ).size_local
+        all_cells = np.arange(num_cells_local, dtype=np.int32)
+
+        # Get set of marked cells
+        marked_cells = set(existing_indices) if len(existing_indices) > 0 else set()
+
+        # Find unmarked cells
+        unmarked_cells = np.array(
+            [cell for cell in all_cells if cell not in marked_cells], dtype=np.int32
+        )
+
+        # Assign a marker ID for unmarked cells
+        unmarked_marker_key = "unmarked_cells"
+
+        if unmarked_marker_key in self.association_table.keys():
+            unmarked_marker_id = self.association_table[unmarked_marker_key]
+        else:
+            # Find a unique marker ID
+            unmarked_marker_id = 1  # Default to 0 for unmarked cells
+            while unmarked_marker_id in self.association_table.values():
+                unmarked_marker_id += 1
+
+            # Store in association table
+            self.association_table[unmarked_marker_key] = unmarked_marker_id
+
+        # Add unmarked cells to the arrays
+        unmarked_values = np.full(
+            len(unmarked_cells), unmarked_marker_id, dtype=np.int32
+        )
+        existing_indices = np.concatenate([existing_indices, unmarked_cells])
+        existing_values = np.concatenate([existing_values, unmarked_values])
+
+        # Log the number of unmarked cells
+        num_unmarked_global = self.mesh.comm.allreduce(len(unmarked_cells), op=MPI.SUM)
+        if num_unmarked_global > 0:
+            self.log(
+                f"Marked {num_unmarked_global} unmarked cells with ID {unmarked_marker_id}"
+            )
+
+        # Create MeshTags with all collected cells
+        if len(existing_indices) > 0:
+            domains = dmesh.meshtags(
+                self.mesh, self.mesh.topology.dim, existing_indices, existing_values
+            )
+        else:
+            # Create empty MeshTags
+            domains = dmesh.meshtags(
+                self.mesh,
+                self.mesh.topology.dim,
+                np.array([], dtype=np.int32),
+                np.array([], dtype=np.int32),
+            )
+
+        self.log(f"Created domain MeshTags with {len(existing_indices)} cells")
+        return domains
+
+    def forward(self, save_jacobian=False, external_jacobian=None):
         psi = self._strain_energy_density()
 
         # Total potential energy
@@ -351,21 +932,73 @@ class NeoHookean:
         J = ufl.derivative(F, self.u, self.du)
 
         # Solve nonlinear variational problem
-        solve_nonlinear_problem(
-            F,
-            self.u,
-            bcs=self.dirichlet_bcs,
-            J=J,
-            comm=self.mesh.comm,
-            log_file_path=os.path.join(self.path, "log.txt"),
-        )
+        try:
+            res = solve_nonlinear_problem(
+                F,
+                self.u,
+                bcs=self.dirichlet_bcs,
+                J=J,
+                comm=self.mesh.comm,
+                logger=self.log,
+                snes_options=self.params.snes_options,
+                save_jacobian=save_jacobian,
+                external_jacobian=external_jacobian,
+            )
+            if save_jacobian:
+                return res[-1]
+            # self.residual.x.array[:] = fem.assemble_vector(fem.form(F)).array
+        except Exception as e:
+            # self.residual.x.array[:] = fem.assemble_vector(fem.form(F)).array
+            self.save(time=int(1e6))
+            raise e
 
     def _objective_function(self):
         raise NotImplementedError()
 
+    def _objective_function_value(self):
+        return self._assemble_scalar_parallel(self._objective_function())
+
+    def _constraints(self):
+        return []
+
+    def _constraints_rhs(self):
+        return None
+
+    def _constraints_values(self):
+        rhs = self._constraints_rhs()
+        if rhs is None:
+            return [self._assemble_scalar_parallel(j) for j in self._constraints()]
+        else:
+            return [
+                self._assemble_scalar_parallel(j) - r
+                for j, r in zip(self._constraints(), rhs)
+            ]
+
     def _set_optimized_variable(self, x: np.ndarray):
-        self.e.x.array[:] = x
+        if self.params.filter_radius is not None:
+            filtered = self._filter_all(x)
+            for comp_id in range(self.n_component):
+                self._filter_vars[comp_id]["raw"].x.array[:] = (
+                    x
+                    if self._filter_vars[comp_id]["map"] is None
+                    else x[self._filter_vars[comp_id]["map"]]
+                )
+                self._filter_vars[comp_id]["raw"].x.scatter_forward()
+                self._filter_vars[comp_id]["filt"].x.array[:] = (
+                    filtered
+                    if self._filter_vars[comp_id]["map"] is None
+                    else filtered[self._filter_vars[comp_id]["map"]]
+                )
+                self._filter_vars[comp_id]["filt"].x.scatter_forward()
+            self.e.x.array[:] = filtered
+        else:
+            self.e.x.array[:] = x
         self.e.x.scatter_forward()
+
+        # raw_e stores unfiltered design regardlessly, so warm start gets unfiltered initial values
+        self.raw_e.x.array[:] = x
+        self.raw_e.x.scatter_forward()
+        self._apply_design_bcs()
 
     def _bounds(self):
         raise NotImplementedError()
@@ -373,109 +1006,391 @@ class NeoHookean:
     def _initial_values(self):
         raise NotImplementedError()
 
-    def eval(self, x):
-        self.log(
-            f"Taking input: min={self.mesh.comm.allreduce(np.min(x), op=MPI.MIN)}, max={self.mesh.comm.allreduce(np.max(x), op=MPI.MAX)}"
-        )
-        self._set_optimized_variable(x)
+    def eval(self, x=None):
+        if x is not None:
+            self._set_optimized_variable(x)
+            self.log(
+                f"Taking input: min={self.mesh.comm.allreduce(np.min(self.e.x.array[:]), op=MPI.MIN)}, max={self.mesh.comm.allreduce(np.max(self.e.x.array[:]), op=MPI.MAX)}"
+            )
         # Solve \partial L/\partial \lambda = 0, i.e. the governing equation it self
         self.log("Solving forward problem")
         self.mesh.comm.Barrier()
-        try:
-            self.forward()
-        except:
-            self._initialize_fields()
-            return np.inf
-        local_loss = fem.assemble_scalar(fem.form(self._objective_function()))
-        loss = self.mesh.comm.allreduce(local_loss, op=MPI.SUM)
-        self.log(f"Loss: {loss}")
-        self.mesh.comm.Barrier()
-        return loss
 
-    def grad(self, x):
+        jac = self.forward(save_jacobian=True)
+        self._temp_jac = jac  # Store temporarily, destroy after grad()
+
+        loss = self._objective_function_value()
+        constraints = self._constraints_values()
+        self.log(f"Loss: {loss} Constraints: {constraints}")
+
+        # Clean up after forward solve
+        gc.collect()
+        try:
+            from petsc4py import PETSc
+
+            PETSc.garbage_cleanup()
+        except:
+            pass
+
+        self.mesh.comm.Barrier()
+        return loss, constraints
+
+    def _grad_state(self, state, state_test):
+        return [
+            ufl.derivative(j, state, state_test)
+            for j in [self._objective_function()] + self._constraints()
+        ]
+
+    def _grad_opt(self, opt, opt_test):
+        return [
+            ufl.derivative(j, opt, opt_test)
+            for j in [self._objective_function()] + self._constraints()
+        ]
+
+    @property
+    def gradient_accumulation_steps(self):
+        return 1
+
+    def grad(self, x=None):
         self.log("Solving gradient")
         self.mesh.comm.Barrier()
-        self._set_optimized_variable(x)
+        if x is not None:
+            self._set_optimized_variable(x)
+
+        # Check if V_u is a subspace (from mixed space) by trying to collapse
+        try:
+            _ = self.V_u.collapse()
+            state_var = self.w
+            state_space = self.V_w
+        except (RuntimeError, AttributeError):
+            state_var = self.u
+            state_space = self.V_u
+
         # Solve \partial L/\partial u = 0 for \lambda. It's a linear equation.
-        j = self._objective_function()
-        dj_du_ufl = -ufl.derivative(j, self.u, self.u_test)
-
-        lagrangian = fem.Function(
-            self.V_u
-        )  # Lagrangian multipliers share the same space as u
-        l_test = ufl.TrialFunction(self.V_u)
         Pi = self._potential_energy()
-        lhs_ufl = ufl.derivative(
-            ufl.derivative(
-                ufl.derivative(
-                    Pi, self.u, lagrangian
-                ),  # Derivative of potential energy w.r.t. u and inner product with lagrangian
-                self.u,
-                self.u_test,
-            ),  # Derivative w.r.t. u
-            lagrangian,
-            l_test,  # Tangent matrix * l_test
-        )
-
-        # No values at DirichletBC boundaries
-        bcs = self._define_dirichlet_boundaries(fixed_value=0.0)
-
-        # Solve using LinearProblem
-        from dolfinx.fem.petsc import LinearProblem
-
-        problem = LinearProblem(
-            lhs_ufl,
-            dj_du_ufl,
-            bcs=bcs,
-            petsc_options={
-                "ksp_type": "preonly",
-                "pc_type": "lu",
-                "pc_factor_mat_solver_type": "mumps",
-            },
-        )
-        lagrangian = problem.solve()
-
-        # Compute \partial L/\partial param
         v_e = ufl.TestFunction(self.V_e)
-        dj_dp_form = fem.form(ufl.derivative(j, self.e, v_e))
-        dj_dp = fem.assemble_vector(dj_dp_form)
-        dj_dp.scatter_reverse(InsertMode.add)
 
-        dfl_dp_form = fem.form(
-            ufl.derivative(ufl.derivative(Pi, self.u, lagrangian), self.e, v_e)
+        grad_state_ls = self._grad_state(state_var, ufl.TestFunction(state_space))
+        grad_opt_ls = self._grad_opt(self.e, v_e)
+
+        grad_ls = []
+
+        for i, (dj_du, dj_de) in enumerate(zip(grad_state_ls, grad_opt_ls)):
+            self.log(
+                f"Solving gradient for {'the objective function' if i==0 else f'constraint {i}'}"
+            )
+            dj_du_ufl = -dj_du
+
+            l_solve = ufl.TrialFunction(state_space)
+
+            lhs_ufl = ufl.derivative(
+                ufl.derivative(Pi, state_var, ufl.TestFunction(state_space)),
+                state_var,
+                l_solve,
+            )
+
+            # Solve using SNES-based linear solver (drop-in for LinearProblem)
+            from src.solvers import solve_linear_problem
+
+            # solution function for adjoint
+            lagrangian = fem.Function(state_space, name="adjoint")
+            self.log("Solving for lagrangian")
+            solve_linear_problem(
+                lhs_ufl,
+                dj_du_ufl,
+                lagrangian,
+                bcs=self.adjoint_bcs,
+                linear_solver="mumps",
+                comm=self.mesh.comm,
+                logger=self.log,
+                A_cache=self._temp_jac if hasattr(self, "_temp_jac") else None,
+            )
+
+            # Compute \partial L/\partial param
+            self.log("Assembling adjoint gradient")
+            dj_dp_form = fem.form(dj_de)
+            dj_dp = fem.assemble_vector(dj_dp_form)
+            dj_dp.scatter_reverse(InsertMode.add)
+
+            dfl_dp_form = fem.form(
+                ufl.derivative(ufl.derivative(Pi, state_var, lagrangian), self.e, v_e)
+            )
+            dfl_dp = fem.assemble_vector(dfl_dp_form)
+            dfl_dp.scatter_reverse(InsertMode.add)
+
+            grad = dj_dp.array + dfl_dp.array
+
+            # Explicitly delete temporary vectors to help GC
+            del dj_dp, dfl_dp, dj_dp_form, dfl_dp_form
+
+            self.mesh.comm.Barrier()
+
+            grad_ls.append(grad.copy())
+
+        # Destroy jacobian immediately after use
+        if hasattr(self, "_temp_jac") and self._temp_jac is not None:
+            self._temp_jac.destroy()
+            self._temp_jac = None
+
+        # Clean up after adjoint solve
+        gc.collect()
+        try:
+            from petsc4py import PETSc
+
+            PETSc.garbage_cleanup()
+        except:
+            pass
+
+        if self.params.filter_radius is not None:
+            grad_unfiltered = [self._filter_all_adjoint(grad) for grad in grad_ls]
+            return grad_unfiltered
+        else:
+            return grad_ls
+
+    def optimize(self, warm_start=False):
+        from src.solvers import MMASolver, BarzilaiBorwein, CCSAMMASolver
+        from functools import partial
+
+        if not warm_start:
+            x = self._initial_values()
+            self._set_optimized_variable(x)
+        else:
+            x = self.raw_e.x.array[:]
+
+        ### Get ready for BarzilaiBorwein
+        if self.n_component == 1:
+            optimizer = BarzilaiBorwein(
+                variant="short",
+                fallback_lr=self.params.lr,
+                smooth_beta=0.99,
+                upper_bound_lr=self.params.upper_bound_lr,
+                lower_bound_lr=self.params.lower_bound_lr,
+            )
+            collapse_map = None
+        else:
+            optimizer = [
+                BarzilaiBorwein(
+                    variant="short",
+                    fallback_lr=(
+                        self.params.lr
+                        if self.params.get(f"lr_{i}", None) is None
+                        else self.params.get(f"lr_{i}", None)
+                    ),
+                    smooth_beta=0.99,
+                    upper_bound_lr=self.params.upper_bound_lr,
+                    lower_bound_lr=self.params.lower_bound_lr,
+                )
+                for i in range(self.n_component)
+            ]
+            collapse_map = []
+            for i in range(self.n_component):
+                _, m = self.V_e.sub(i).collapse()
+                collapse_map.append(m)
+
+        ### Get ready for MMA
+        bounds = np.array(self._bounds())
+        mma_solver = MMASolver(
+            len(x), bounds[:, 0], bounds[:, 1], move_limit=self.params.clip_gradient
         )
-        dfl_dp = fem.assemble_vector(dfl_dp_form)
-        dfl_dp.scatter_reverse(InsertMode.add)
 
-        grad = dj_dp.array + dfl_dp.array
-        self.gradient.x.array[:] = grad
-        self.mesh.comm.Barrier()
-        return grad.copy()
+        ### Get ready for CCSA-MMA
+        def x_new_eval(x, init_x):
+            self.log(f"Performing an inner evaluation for CCSA-MMA")
+            init_u = self.u.x.array[:].copy()
+            grad = init_x - x
+            if self.params.design_fields_disabled is not None:
+                for comp_id in self.params.design_fields_disabled:
+                    grad[collapse_map[comp_id]] = 0
+            fem.set_bc(grad, self.gradient_dirichlet_bcs)
+            if self.params.design_fields_disabled is not None:
+                for comp_id in self.params.design_fields_disabled:
+                    grad[collapse_map[comp_id]] = 0
+            x = init_x - grad
+            x = np.clip(x, a_min=bounds[:, 0], a_max=bounds[:, 1])
+            loss, constraints = self.eval(x)
+            self.u.x.array[:] = init_u
+            self.u.x.scatter_forward()
+            self.log(
+                f"Inner evaluation for CCSA-MMA: Loss {loss}, Constraints {constraints}"
+            )
+            return loss, constraints
 
-    def optimize(self):
-        x0 = self._initial_values()
-        x = x0
-        self._set_optimized_variable(x0)
+        ccsamma_solver = CCSAMMASolver(
+            len(x),
+            bounds[:, 0],
+            bounds[:, 1],
+            move_limit=self.params.clip_gradient,
+            rel_tolerance=self.params.ccsamma_rel_tolerance,
+        )
+
+        # Memory tracking
+        try:
+            import psutil
+            import os as _os
+
+            process = psutil.Process(_os.getpid())
+            mem_tracking = True
+
+            # Check petsc4py version and warn if >= 3.20
+            try:
+                from petsc4py import PETSc
+
+                version = PETSc.Sys.getVersion()
+                if version >= (3, 20, 0):
+                    self.log(
+                        f"WARNING: petsc4py {version[0]}.{version[1]}.{version[2]} has known MPI memory leaks"
+                    )
+                    self.log("Recommendations:")
+                    self.log(
+                        "  1. Downgrade: conda install -c conda-forge 'petsc4py<=3.19.6'"
+                    )
+                    self.log(
+                        "  2. Increase CCSAMMA tolerance to reduce inner evaluations"
+                    )
+                    self.log(
+                        "     params.ccsamma_rel_tolerance = 1e-3  # (default 1e-5)"
+                    )
+                    self.log("See: https://github.com/FEniCS/dolfinx/issues/3522")
+            except:
+                pass
+        except:
+            mem_tracking = False
 
         for i in range(self.params.maxiter):
-            print()
+            self.log("")
             self.mesh.comm.Barrier()
-            self.log(f"----- Iteration {i} -----")
-            res = self.eval(x)
-            self._loss_history.append(res)
-            self._stage_loss_history.append(res)
-            grad = self.grad(x)
-            x -= self.params.lr * grad
-            for i, bound in zip(range(len(x)), self._bounds()):
-                if bound[0] is not None:
-                    x[i] = max(bound[0], x[i])
-                if bound[1] is not None:
-                    x[i] = min(bound[1], x[i])
+
+            if mem_tracking:
+                mem_start = process.memory_info().rss / 1024**2
+                self.log(f"----- Iteration {i} ----- Memory: {mem_start:.1f} MB")
+            else:
+                self.log(f"----- Iteration {i} -----")
+
+            loss, constraints = self.eval(x)
+
+            # Force cleanup immediately after eval
+            gc.collect()
+
+            self._loss_history.append(loss)
+            self._stage_loss_history.append(loss)
+
+            if len(constraints) > 0 and self.params.optimizer not in ["MMA", "CCSAMMA"]:
+                self.log(
+                    "Warning: Constraints are defined. Using MMA instead of BarzilaiBorwein."
+                )
+                self.params.optimizer = "MMA"
+
+            if self.params.optimizer in ["MMA", "CCSAMMA"]:
+                _grad_ls = self.grad()
+                # Force cleanup immediately after grad
+                gc.collect()
+                [fem.set_bc(_grad, self.gradient_dirichlet_bcs) for _grad in _grad_ls]
+                if self.params.design_fields_disabled is not None:
+                    for comp_id in self.params.design_fields_disabled:
+                        for _grad in _grad_ls:
+                            _grad[collapse_map[comp_id]] = 0
+                self.log(
+                    f"Get gradient vectors in ranges: {[f'({x.min():.5e},{x.max():.5e}) ' for x in _grad_ls]}"
+                )
+                self.log(f"Start {self.params.optimizer}")
+                if self.params.optimizer == "MMA":
+                    grad = x - mma_solver.step(
+                        x,
+                        loss,
+                        _grad_ls[0],
+                        np.array(constraints),
+                        np.array(_grad_ls[1:]),
+                    )
+                elif self.params.optimizer == "CCSAMMA":
+                    grad = x - ccsamma_solver.step(
+                        x,
+                        loss,
+                        _grad_ls[0],
+                        np.array(constraints),
+                        np.array(_grad_ls[1:]),
+                        eval_func=partial(x_new_eval, init_x=x),
+                    )
+                self.log(f"{self.params.optimizer} completed")
+                fem.set_bc(grad, self.gradient_dirichlet_bcs)
+            elif self.params.optimizer == "BarzilaiBorwein":
+                grad = self.grad()[0]
+                fem.set_bc(grad, self.gradient_dirichlet_bcs)
+                if self.n_component == 1:
+                    lr = optimizer.step(x, grad)
+                    grad = lr * grad
+                else:
+                    lr = []
+                    for opt, m in zip(optimizer, collapse_map):
+                        l = opt.step(x[m], grad[m])
+                        lr.append(l)
+                        grad[m] = l * grad[m]
+                self.log(f"Learning rate from Barzilai-Borwein: {lr}")
+                grad = np.clip(
+                    grad,
+                    a_min=-self.params.clip_gradient,
+                    a_max=self.params.clip_gradient,
+                )
+
+            if self.params.design_fields_disabled is not None:
+                for comp_id in self.params.design_fields_disabled:
+                    grad[collapse_map[comp_id]] = 0
+            x = x - grad
+
+            x = np.clip(x, a_min=bounds[:, 0], a_max=bounds[:, 1])
             self.mesh.comm.Barrier()
             self.optimized = True
             terminate = self._optimize_callback()
+
+            # Aggressive cleanup at end of each iteration
+            # See: https://github.com/FEniCS/dolfinx/issues/3522
+            if mem_tracking:
+                mem_before_gc = process.memory_info().rss / 1024**2
+
+            # Critical: Call PETSc cleanup BEFORE Python GC
+            # This releases PETSc internal caches first, then Python can collect the wrappers
+            try:
+                from petsc4py import PETSc
+
+                PETSc.garbage_cleanup()
+            except:
+                pass
+
+            # Now Python GC can collect the freed objects
+            # Use generation 2 collection to be more aggressive
+            gc.collect(2)
+            gc.collect(2)
+            gc.collect(2)
+
+            # Second pass of PETSc cleanup
+            try:
+                from petsc4py import PETSc
+
+                PETSc.garbage_cleanup()
+            except:
+                pass
+
+            # Force OS to reclaim memory
+            try:
+                import ctypes
+
+                libc = ctypes.CDLL("libc.so.6")
+                libc.malloc_trim(0)
+            except:
+                pass
+
+            if mem_tracking:
+                mem_after_gc = process.memory_info().rss / 1024**2
+                gc_freed = mem_before_gc - mem_after_gc
+                iter_delta = mem_after_gc - mem_start
+                self.log(
+                    f"Memory: {mem_after_gc:.1f} MB | GC freed: {gc_freed:.1f} MB | Iter delta: {iter_delta:+.1f} MB"
+                )
+
             if terminate:
                 break
+
+        self.log("Optimization completed.")
+        self.log(f"Initial values: {self._initial_objective_values}")
         if self.mesh.comm.Get_rank() == 0:
             plt.figure(figsize=(4, 3), dpi=300)
             ax = plt.subplot(111)
@@ -490,59 +1405,175 @@ class NeoHookean:
         if self._optimize_step % self.params.output_per_step == 0:
             self.save(time=self._optimize_step)
         self._optimize_step += 1
-        if len(self._loss_history) > 1 and (
-            0
-            < (1 - self._loss_history[-1] / self._loss_history[-2])
-            < self.params.relative_tol
-            or (
-                len(self._stage_loss_history) > 10
-                and self._stage_loss_history[-10] == min(self._stage_loss_history[-10:])
+        if len(self._loss_history) > 2:
+            self.log(
+                f"Convergence criterion: {(1 - self._loss_history[-1] / self._loss_history[-2])
+                * np.sign(self._loss_history[-1])} < {self.params.relative_tol}"
             )
-        ):
-            return True
+            if len(self._loss_history) < 20:
+                self.log("Convergence criterion ignored before 20 iterations.")
+            elif (1 - self._loss_history[-1] / self._loss_history[-2]) * np.sign(
+                self._loss_history[-1]
+            ) > (1 - self._loss_history[-2] / self._loss_history[-3]) * np.sign(
+                self._loss_history[-2]
+            ):
+                self.log(
+                    "Loss reduction keeps increasing and convergence criterion is ignored"
+                )
+            elif (
+                0
+                < (1 - self._loss_history[-1] / self._loss_history[-2])
+                * np.sign(self._loss_history[-1])
+                < self.params.relative_tol
+                and 0
+                < (1 - self._loss_history[-2] / self._loss_history[-3])
+                * np.sign(self._loss_history[-2])
+                < self.params.relative_tol
+            ):
+                self.log("Converged.")
+                return True
+            elif len(self._stage_loss_history) > 500 and self._stage_loss_history[
+                -50
+            ] == min(self._stage_loss_history[-50:]):
+                self.log("Loss not decreasing.")
+                return True
         return False
 
-    def _strain_energy_density(self, F=None, C=None, Eps=None):
-        to_3d = lambda x: (
+    def to_3d(self, x):
+        return (
             ufl.as_tensor([[x[0, 0], x[0, 1], 0], [x[1, 0], x[1, 1], 0], [0, 0, 1]])
             if self.params.dim == 2
             else x
         )
 
+    @property
+    def n_component(self) -> int:
+        return 1
+
+    @property
+    def E(self):
+        return self.params.E
+
+    @property
+    def mu(self):
+        """
+        Lame second constant / shear modulus
+        """
+        return self.E / (2 * (1 + self.params.nu))
+
+    @property
+    def lmbda(self):
+        """
+        Lame first constant
+        """
+        return (
+            self.E * self.params.nu / (1 + self.params.nu) / (1 - 2 * self.params.nu)
+        )  # Lame first coefficient
+
+    @property
+    def kappa(self):
+        """
+        Bulk modulus
+        """
+        return self.E / (3 * (1 - 2 * self.params.nu))
+
+    def strain_invariant(self, F=None, C=None, Eps=None):
+        """
+        First invariant, sqrt of third invariant of right Cauchy Green tensor,
+        deformation gradient, and right Cauchy Green tensor
+        """
         if Eps is None:
             if F is None:
                 F = self._deformation_gradient()
             if C is None:
                 C = self._right_cauchy_green(F=F)
-            F = to_3d(F)
-            C = to_3d(C)
+            F = self.to_3d(F)
+            C = self.to_3d(C)
             J = ufl.det(F)
         else:
             C = 2.0 * Eps + ufl.Identity(len(self.u))
-            C = to_3d(C)
+            C = self.to_3d(C)
             J = ufl.sqrt(ufl.det(C))
         Ic = ufl.tr(C)
+        return Ic, J, F, C
+
+    def _strain_energy_density(self, F=None, C=None, Eps=None):
+        Ic, J, _, _ = self.strain_invariant(F=F, C=C, Eps=Eps)
 
         # Elasticity parameters
-        mu = self.params.E / (2 * (1 + self.params.nu))  # Lame second coefficient
-        lmbda = (
-            self.params.E
-            * self.params.nu
-            / (1 + self.params.nu)
-            / (1 - 2 * self.params.nu)
-        )  # Lame first coefficient
+        mu = self.mu  # Lame second coefficient
+        kappa = self.kappa
 
         # Stored strain energy density (compressible neo-Hookean model)
-        psi = (mu / 2) * (Ic - 3) - mu * ufl.ln(J) + (lmbda / 2) * (ufl.ln(J)) ** 2
+        psi = (mu / 2) * (J ** (-2 / 3) * Ic - 3) + (kappa / 2) * (ufl.ln(J)) ** 2
         return psi
+
+    def _body_force_energy(self):
+        if self.params.body_force_applied_on == "deformed":
+            scalar_space = fem.functionspace(self.mesh, ("CG", 1))
+            _, J, _, _ = self.strain_invariant()
+            # J has to be isolated from symbolic differentiation,
+            # otherwise the minimization manipulates surface area to minimize external work
+            J_projected = project(J, scalar_space, "isolated_J")
+            return ufl.dot(self.B, self.u) * J_projected * self.dx
+        elif self.params.body_force_applied_on == "reference":
+            return ufl.dot(self.B, self.u) * self.dx
+        else:
+            raise Exception(
+                f"Forces are applied on either deformed or reference configuration."
+            )
+
+    def _apply_neumann_bcs(self, energy):
+        N = ufl.FacetNormal(self.mesh)
+        if self.params.tractions_applied_on == "deformed":
+            F = self._deformation_gradient()
+            _, J, _, _ = self.strain_invariant()
+            tensor_space = fem.functionspace(
+                self.mesh,
+                ("CG", 1, (self.mesh.geometry.dim, self.mesh.geometry.dim)),
+            )
+            scalar_space = fem.functionspace(self.mesh, ("CG", 1))
+            # J and F have to be isolated from symbolic differentiation,
+            # otherwise the minimization manipulates surface area to minimize external work
+            F = project(F, tensor_space, "isolated_F")
+            J = project(J, scalar_space, "isolated_J")
+            for i, val in self.neumann_bcs:
+                if (
+                    isinstance(val, fem.Constant)
+                    and val.value.size == 1
+                    or isinstance(val, fem.Function)
+                    and val.function_space.value_size == 1
+                ):
+                    energy -= ufl.dot(
+                        val * J * ufl.transpose(ufl.inv(F)) * N, self.u
+                    ) * self.boundary_ds(i)
+                else:
+                    norm_cof_F = J * ufl.transpose(ufl.inv(F)) * N
+                    norm_cof_F = ufl.sqrt(ufl.dot(norm_cof_F, norm_cof_F))
+                    energy -= ufl.dot(val, self.u) * norm_cof_F * self.boundary_ds(i)
+            return energy
+        elif self.params.tractions_applied_on == "reference":
+            for i, val in self.neumann_bcs:
+                if (
+                    isinstance(val, fem.Constant)
+                    and val.value.size == 1
+                    or isinstance(val, fem.Function)
+                    and val.function_space.value_size == 1
+                ):
+                    val = val * N
+                energy -= ufl.dot(val, self.u) * self.boundary_ds(i)
+            return energy
+        else:
+            raise Exception(
+                f"Forces are applied on either deformed or reference configuration."
+            )
 
     def _potential_energy(self, psi=None):
         if psi is None:
             psi = self._strain_energy_density()
-        energy = psi * self.dx - ufl.dot(self.params.B, self.u) * self.dx
+        energy = psi * self.dx - self._body_force_energy()
         # Neumann boundaries
-        for i, val in self.neumann_bcs:
-            energy -= ufl.dot(val, self.u) * self.boundary_ds(i)
+        energy = self._apply_neumann_bcs(energy)
         return energy
 
     def _deformation_gradient(self):
@@ -604,10 +1635,17 @@ class NeoHookean:
 
     def _get_point_data(self, main_field=None):
         u_field = self.u if main_field is None else main_field
-        point_data = {u_field.name: u_field}
+        point_data = {
+            u_field.name: u_field,
+            self.e.name: self.e,
+            # self.gradient.name: self.gradient,
+            # self.residual.name: self.residual,
+        }
 
-        if self.optimized:
-            point_data.update({self.e.name: self.e, self.gradient.name: self.gradient})
+        if self.params.filter_radius is not None:
+            for comp_id in range(self.n_component):
+                point_data[f"Raw_{comp_id}"] = self._filter_vars[comp_id]["raw"]
+                point_data[f"Filtered_{comp_id}"] = self._filter_vars[comp_id]["filt"]
 
         return point_data
 
@@ -616,7 +1654,8 @@ class NeoHookean:
             self.mesh, ("DG", 0, (self.mesh.geometry.dim, self.mesh.geometry.dim))
         )
         e = project(self._strain(), tensor_space, "strain")
-        sigma = project(self._PK2_stress(), tensor_space, "PK2_stress")
+        pk2 = project(self._PK2_stress(), tensor_space, "PK2_stress")
+        sigma = project(self._Cauchy_stress(), tensor_space, "Cauchy_stress")
 
         scalar_space = fem.functionspace(self.mesh, ("DG", 0))
         psi = project(
@@ -627,28 +1666,49 @@ class NeoHookean:
         rank_field = fem.Function(scalar_space, name="mpi_rank")
         rank_field.x.array[:] = self.mesh.comm.rank
 
+        # Add domain markers for visualization
+        domain_markers = fem.Function(scalar_space, name="domain_markers")
+        num_cells_local = self.mesh.topology.index_map(
+            self.mesh.topology.dim
+        ).size_local
+        domain_markers.x.array[:num_cells_local] = 0  # Initialize to 0
+
+        # Map domain tags to cell values
+        if len(self.domains.indices) > 0:
+            # Create a mapping from cell index to marker value
+            for cell_idx, marker_val in zip(self.domains.indices, self.domains.values):
+                if cell_idx < num_cells_local:  # Only set locally owned cells
+                    domain_markers.x.array[cell_idx] = marker_val
+
         cell_data = {
             "strain": e,
-            "PK2_stress": sigma,
+            "PK2_stress": pk2,
+            # "Cauchy_stress": sigma,
             "strain_energy_density": psi,
             "mpi_rank": rank_field,
+            "domain_markers": domain_markers,
         }
 
         if self.optimized:
-            e_projected = project(self.e, scalar_space, "Optimized_projected")
-            grad_projected = project(
-                self.filtered_gradient, scalar_space, "Gradient_projected"
+            bs = self.V_e.dofmap.bs
+            space = (
+                fem.functionspace(self.mesh, ("DG", 0, (bs,)))
+                if bs > 1
+                else scalar_space
             )
+            e_projected = project(self.e, space, "Optimized_projected")
+            # grad_projected = project(self.gradient, space, "Gradient_projected")
             cell_data.update(
                 {
                     "Optimized_projected": e_projected,
-                    "Gradient_projected": grad_projected,
+                    # "Gradient_projected": grad_projected,
                 }
             )
 
         return cell_data
 
     def save(self, main_field=None, time=0):
+        self.log(f"Start saving time {time}")
         point_data = self._get_point_data(main_field)
         cell_data = self._get_cell_data()
 
@@ -663,11 +1723,9 @@ class NeoHookean:
                 ref_file = os.path.relpath(vtu_filename, self.path)
             self.timesteps.append((time, ref_file))
         write_pvd(self.pvd_file, self.timesteps, comm=self.mesh.comm)
+        self.log(f"Finish saving")
 
     def compute_traction_dirichlet(self, type="PK1"):
-        space_for_stress = fem.functionspace(
-            self.mesh, ("DG", 0, (self.mesh.geometry.dim, self.mesh.geometry.dim))
-        )
         if type == "PK1":
             stress = self._PK1_stress()
         elif type == "Cauchy":
@@ -676,7 +1734,6 @@ class NeoHookean:
             raise Exception(
                 f"Stress type {type} not supported for computing tractions."
             )
-        pk1_stress = project(stress, space_for_stress, "stress")
         N = ufl.FacetNormal(self.mesh)
         e_x = fem.Constant(
             self.mesh, ScalarType([1.0, 0.0] + ([] if self.params.dim == 2 else [0.0]))
@@ -689,25 +1746,22 @@ class NeoHookean:
             if self.params.dim == 2
             else fem.Constant(self.mesh, ScalarType((0.0, 0.0, 1.0)))
         )
-        tx = ufl.dot(ufl.dot(pk1_stress, N), e_x)
-        ty = ufl.dot(ufl.dot(pk1_stress, N), e_y)
-        tz = None if self.params.dim == 2 else ufl.dot(ufl.dot(pk1_stress, N), e_z)
+        tx = ufl.dot(ufl.dot(stress, N), e_x)
+        ty = ufl.dot(ufl.dot(stress, N), e_y)
+        tz = None if self.params.dim == 2 else ufl.dot(ufl.dot(stress, N), e_z)
         tractions = {}
         for name, key in self.association_table.items():
-            local_tx = fem.assemble_scalar(fem.form(tx * self.boundary_ds(key)))
-            local_ty = fem.assemble_scalar(fem.form(ty * self.boundary_ds(key)))
-            global_tx = self.mesh.comm.allreduce(local_tx, op=MPI.SUM)
-            global_ty = self.mesh.comm.allreduce(local_ty, op=MPI.SUM)
+            global_tx = self._assemble_scalar_parallel(tx * self.boundary_ds(key))
+            global_ty = self._assemble_scalar_parallel(ty * self.boundary_ds(key))
 
             tractions[name] = [global_tx, global_ty]
             if tz is not None:
-                local_tz = fem.assemble_scalar(fem.form(tz * self.boundary_ds(key)))
-                global_tz = self.mesh.comm.allreduce(local_tz, op=MPI.SUM)
+                global_tz = self._assemble_scalar_parallel(tz * self.boundary_ds(key))
                 tractions[name].append(global_tz)
         return tractions
 
     def record_traction_dirichlet(self, type="PK1", step=0):
-        tractions = self.compute_traction_dirichlet(type="PK1")
+        tractions = self.compute_traction_dirichlet(type=type)
         for name, values in tractions.items():
             for val, dir in zip(
                 values, ["x", "y"] + (["z"] if len(values) == 3 else [])
@@ -719,4 +1773,4 @@ class NeoHookean:
 
     def save_records(self):
         if self.mesh.comm.rank == 0:
-            self.records.to_csv(os.path.join(self.path, "records.csv"))
+            self.records.to_csv(self.record_file)

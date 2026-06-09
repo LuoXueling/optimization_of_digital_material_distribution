@@ -2,30 +2,37 @@
 
 ## Installation
 
-This repo is built upon Python 3.12 and FEniCSx (DOLFINx)
+This repo is built upon Python 3.12 and FEniCSx (DOLFINx), in an Anaconda environment. We also use gmsh GUI for mesh generation, and Paraview for visualization.
 
 ```shell
 conda create -n fenicsx python=3.12
 conda activate fenicsx
-conda install -c conda-forge fenics-dolfinx mpich pyvista 
-conda install -c conda-forge gmsh python-gmsh matplotlib pandas scipy
+conda install -c conda-forge fenics-dolfinx=0.9.0 mpich pyvista 
+conda install -c conda-forge gmsh python-gmsh matplotlib pandas scipy 
+conda install -c conda-forge adios2 adios4dolfinx=0.9.5
 ```
 
 ## Usage
 
 ### Implemented methods
 
-* `src/neoHookean.py` implements a neo-Hookean model and a basic optimization framework as the foundation of all other implementations. 
-* `src/neoHookean_topo_opt.py` implements a simple implementation of adjoint-state-method-based SIMP topology optimization for a neo-Hookean model. 
-* `src/neoHookean_incompressible.py` implements the incompressible neo-Hookean model using coupled u-p scheme and staggered (augmented Lagrange) scheme.
+* `src/neoHookean.py` implements a neo-Hookean model and a basic optimization framework with Helmholtz filtering as the foundation of all other implementations. 
+* `src/neoHookean_topo_opt.py` implements the adjoint-state-method-based SIMP topology optimization for a neo-Hookean model. 
+* `src/neoHookean_tmc.py` implements the third medium contact approach for contact problems. 
+* `src/steven.py` implements the pICNN-based constitutive model in our previous work ([10.1016/j.ijengsci.2025.104381](10.1016/j.ijengsci.2025.104381)) for digital materials. 
 
 ### Configuration and execution
 
-Default parameters are in `default_config.py`. Copy `default_config.py` to another config file (e.g., `config.py`) and modify parameters there.
+All commands we used to generate results in the paper are in `command_lines.sh`, which will guide you to the corresponding `main_*.py` files that define the optimization problem and logic using interfaces defined in parent classes, and also the mesh and configuration files in `mesh/` folder. 
 
-#### Example: neo-Hookean
+Default parameters are in `src/default_config.py`. Write your own `config.py` to override the default parameters. Surfaces where boundary conditions are applied and domains to be designed or frozen can be either defined by lambda functions or predefined in gmsh mesh files by "Physical groups". Finally, run a main script. 
 
-Here is an example of solving a neo-Hookean body with dirichlet boundaries and neumann boundaries:
+Here are two examples of solving or optimizing a neo-Hookean body with dirichlet boundaries and neumann boundaries, from which you can see how easily it is to set up a problem with our implementation:
+
+<details>
+<summary>
+Example: Neo-Hookean with Dirichlet and Neumann boundaries
+</summary>
 
 Generate a 2D triangular mesh using `gmsh`, with boundaries defined in "Physical groups" as "Curve", namely "upper" and "right", and the domain defined as "Surface", namely "main". The mesh is `mesh/square.geo` and `mesh/square.msh`.
 
@@ -50,26 +57,24 @@ params = dotdict(
     nu=0.3,
 )
 
-mesh, boundaries, association_table = import_mesh("square", directory="mesh")
+mesh, cell_tags, boundaries, association_table = import_mesh("square", directory="mesh")
 
 params.update(
     dotdict(
         mesh=mesh,
-        # Body force
-        B=fem.Constant(mesh, ScalarType((0.0, 0.0))),  # Body force per unit volume # Modify for 3D
         # Mark Dirichlet boundary subdomains and values
         dirichlet_bcs_dict={
-            lambda x: np.isclose(x[0], 0.0): fem.Constant(mesh, ScalarType((0.0, 0.0))),  # Modify for 3D
+            lambda x: np.isclose(x[0], 0.0): (0.0, 0.0),  # Modify for 3D
         },
         neumann_bcs_dict=None,
         boundaries=boundaries,  # boundaries is a MeshTags with some boundaries marked for neumann bcs
         association_table=association_table,
         neumann_bcs=[
-            (association_table["upper"], fem.Constant(mesh, ScalarType((0.0, -0.001)))),
-            (association_table["right"], fem.Constant(mesh, ScalarType((-0.001, 0.0)))),
+            (association_table["upper"], (0.0, -0.001)),
+            (association_table["right"], (-0.001, 0.0)),
         ],  # a list of tuples (boundary_id, (f_x, f_y, f_z)).
         dirichlet_bcs=[
-            (association_table["bottom"], fem.Constant(mesh, ScalarType((0.0, 0.0))))
+            (association_table["bottom"], (0.0, 0.0))
         ],  # a list of tuples (boundary_id, (u_x, u_y, u_z))
     )
 )
@@ -85,9 +90,14 @@ problem.forward()
 problem.save()
 ```
 
-#### Example: Topology optimization for neo-Hookean
+</details>
 
-This example generates mesh and define Dirichlet and Neumann boundaries using FEniCS itself instead of using `gmsh`.
+<details>
+<summary>
+Example: Topology optimization for neo-Hookean
+</summary>
+
+This example generates mesh and define Dirichlet and Neumann boundaries using FEniCSx itself instead of using `gmsh`.
 
 In `config.py`:
 
@@ -109,21 +119,37 @@ params = dotdict(
     # Geometry settings
     width=4,
     height=1,
-    mesh_size=0.04,
+    mesh_size=0.01,
     # Optimization settings
     target_volume=0.5,
     min_density=0.001,
-    init_penalty=1,
-    max_penalty=4.0,
-    r_min=0.12,
+    init_penalty=6.0,
+    max_penalty=6.0,
+    gradient_filter=None,
+    filter_radius=0.01,
+    clip_gradient=0.02,
     output_per_step=1,
-    maxiter=10000,
-    lr=1,
+    maxiter=100,
+    fix_density_h=None,
+    optimizer="MMA",
+    # fix_design_domain="left_half",
     # Solver settings
-    relative_tol=0.001,
+    relative_tol=0.0001,
+    snes_options={
+        "snes_type": "newtonls",
+        "snes_linesearch_type": "bt",
+        "snes_rtol": 1e-9,
+        "snes_atol": 1e-10,
+        "snes_max_it": 100,
+        "snes_linesearch_max_it": 100,
+        # "snes_linesearch_alpha": 1e-2,
+        "snes_linesearch_order": 1,
+    },
     # Elasticity parameters
+    c=1.0,
     E=10.0,
     nu=0.3,
+    kr_coef=1e-4,
 )
 
 _mesh = dmesh.create_rectangle(
@@ -139,25 +165,32 @@ _mesh = dmesh.create_rectangle(
 params.update(
     dotdict(
         mesh=_mesh,
-        # Body force
-        B=fem.Constant(_mesh, ScalarType((0.0, 0.0))),  # Body force per unit volume # Modify for 3D
+        domain_dict={
+            lambda x: x[0] < 0.5: "left_half",
+        },
         # Mark Dirichlet boundary subdomains and values
         dirichlet_bcs_dict={
-            lambda x: np.isclose(x[0], 0.0): fem.Constant(_mesh, ScalarType((0.0, 0.0))),  # Modify for 3D
+            lambda x: np.isclose(x[0], 0.0): (0.0, 0.0),  # Modify for 3D
         },
         neumann_bcs_dict={
-            lambda x: np.isclose(x[0], params.width) & np.isclose(x[1], 0, atol=params.mesh_size * 1.1): fem.Constant(_mesh, ScalarType((0.0, -0.0001))),  # Modify for 3D
+            lambda x: np.isclose(x[0], params.width)
+            & np.isclose(x[1], 0, atol=params.mesh_size * 1.1): (
+                0.0,
+                -0.01,
+            ),  # Modify for 3D
         },
     )
 )
+
 ```
 
 The main script
 
 ```python
-from src.neoHookean_topo_opt import NeoHookeanTopoOpt
+from src.neoHookean_topo_opt import NeoHookeanPDEFilteredTopoOpt
 
-problem = NeoHookeanTopoOpt(config_path="config.py")
+problem = NeoHookeanPDEFilteredTopoOpt(config_path="config.py")
 problem.optimize()
 ```
 
+</details>

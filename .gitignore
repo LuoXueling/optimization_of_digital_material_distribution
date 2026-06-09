@@ -1,8 +1,11 @@
 # 
 outputs/
+outputs_test/
+tests/
 references/
 simple_working_code/
 .vscode/
+.claude/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

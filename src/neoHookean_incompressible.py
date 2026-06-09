@@ -3,19 +3,30 @@ import ufl
 import basix.ufl
 from src.default_config import params
 from src.neoHookean import NeoHookean
+from src.neoHookean_topo_opt import NeoHookeanTopoOpt
+from src.neoHookean_tmc import NeoHookeanTMC
 from src.utils import project
 import numpy as np
 from mpi4py import MPI
 from src.solvers import solve_nonlinear_problem
+from dolfinx.la import InsertMode
+import warnings
 
 
 class NeoHookeanIncompressible(NeoHookean):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
+        self.log(
+            f"Multi-field incompressibility is not working properly right now "
+            f"because of the processing of boundary conditions inputs."
+        )
+
         # define function space (mixed element)
         # P2 vector element for displacement
-        el_u = basix.ufl.element("Lagrange", self.mesh.basix_cell(), 2, shape=(self.mesh.geometry.dim,))
+        el_u = basix.ufl.element(
+            "Lagrange", self.mesh.basix_cell(), 2, shape=(self.mesh.geometry.dim,)
+        )
         # P1 scalar element for pressure (Lagrange multiplier)
         el_p = basix.ufl.element("Lagrange", self.mesh.basix_cell(), 1)
         # Create mixed element
@@ -33,14 +44,15 @@ class NeoHookeanIncompressible(NeoHookean):
 
         # Override V_u to point to the displacement subspace for boundary conditions
         self.V_u = self.V_w.sub(0)
+        self.V_p = self.V_w.sub(1)
 
-        self.dirichlet_bcs = self._define_dirichlet_boundaries()
+        self.load_boundary_conditions()
 
     def _initialize_fields(self):
         self.w = fem.Function(self.V_w)
         self.u, self.p = ufl.split(self.w)
 
-    def forward(self):
+    def forward(self, save_jacobian=False, external_jacobian=None):
         psi = self._strain_energy_density()
 
         # Total potential energy
@@ -53,34 +65,28 @@ class NeoHookeanIncompressible(NeoHookean):
         J = ufl.derivative(F, self.w, ufl.TrialFunction(self.V_w))
 
         # Solve variational problem
-        solve_nonlinear_problem(F, self.w, bcs=self.dirichlet_bcs, J=J, comm=self.mesh.comm)
+        res = solve_nonlinear_problem(
+            F,
+            self.w,
+            bcs=self.dirichlet_bcs,
+            J=J,
+            comm=self.mesh.comm,
+            logger=self.log,
+            snes_options=self.params.snes_options,
+            save_jacobian=save_jacobian,
+            external_jacobian=external_jacobian,
+        )
+        if save_jacobian:
+            return res[-1]
 
     def _strain_energy_density(self, F=None, C=None, Eps=None):
-        to_3d = lambda x: (
-            ufl.as_tensor([[x[0, 0], x[0, 1], 0], [x[1, 0], x[1, 1], 0], [0, 0, 1]])
-            if self.params.dim == 2
-            else x
-        )
-
-        if Eps is None:
-            if F is None:
-                F = self._deformation_gradient()
-            if C is None:
-                C = self._right_cauchy_green(F=F)
-            F = to_3d(F)
-            C = to_3d(C)
-            J = ufl.det(F)
-        else:
-            C = 2.0 * Eps + ufl.Identity(len(self.u))
-            C = to_3d(C)
-            J = ufl.sqrt(ufl.det(C))
-        Ic = ufl.tr(C)
+        Ic, J, _, _ = self.strain_invariant(F=F, C=C, Eps=Eps)
 
         # Elasticity parameters
-        mu = self.params.E / (2 * (1 + self.params.nu))  # Lame second coefficient
+        mu = self.mu  # Lame second coefficient
 
-        # Stored strain energy density (incompressible neo-Hookean model)
-        psi = (mu / 2) * (Ic - 3) - mu * ufl.ln(J) + self.p * (J - 1)
+        # Stored strain energy density
+        psi = (mu / 2) * (J ** (-2 / 3) * Ic - 3) + self.p * (J - 1)
         return psi
 
     def _get_point_data(self, main_field=None):
@@ -93,6 +99,61 @@ class NeoHookeanIncompressible(NeoHookean):
         # Projection to P1 is handled in write_vtu if needed
         point_data = super()._get_point_data(main_field=u)
         point_data["pressure"] = p
+        return point_data
+
+
+class NeoHookeanIncompressibleTMC(NeoHookeanIncompressible):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.dx = self.domain_dx(self.association_table[self.params.main_medium])
+        self.third_medium_dx = self.domain_dx(
+            self.association_table[self.params.third_medium]
+        )
+        self.area = self._assemble_scalar_parallel(1.0 * self.dx)
+
+    def load_boundary_conditions(self):
+        # Call parent to load displacement boundary conditions
+        NeoHookeanIncompressible.load_boundary_conditions(self)
+
+        if hasattr(self, "V_p"):
+            # Add pressure constraint in third medium region
+            pressure_bcs = self._define_domain_dirichlet_constraints(
+                function_space=self.V_p,
+                domain_marker=self.association_table[self.params.third_medium],
+                fixed_value=0.0,
+            )
+            self.dirichlet_bcs.extend(pressure_bcs)
+
+    def _strain_energy_density_third_medium(self, F=None, C=None, Eps=None):
+        Ic, J, _, _ = self.strain_invariant(F=F, C=C, Eps=Eps)
+
+        # Elasticity parameters
+        mu = self.mu  # Lame second coefficient
+
+        kappa = 1 / (2 * (1 + 0.5))
+        # Has to add a nearly incompressiblity term? instead of a strict incompressibility
+        # Adds convergence with this term.
+        psi = (mu / 2) * (J ** (-2 / 3) * Ic - 3) + 0.5 * kappa * (ufl.ln(J)) ** 2
+        return psi
+
+    def _potential_energy(self, psi=None):
+        return NeoHookeanTMC._potential_energy(self, psi)
+
+
+class NeoHookeanIncompressibleTopoOpt(NeoHookeanTopoOpt, NeoHookeanIncompressible):
+    def __init__(self, *args, **kwargs):
+        NeoHookeanIncompressible.__init__(self, *args, **kwargs)
+        NeoHookeanTopoOpt._init_topo_opt(self)
+
+    def _strain_energy_density(self, F=None, C=None, Eps=None):
+        return (
+            self.density**self.penalty
+            * NeoHookeanIncompressible._strain_energy_density(self, F=F, C=C, Eps=Eps)
+        )
+
+    def _get_point_data(self, main_field=None):
+        point_data = NeoHookeanIncompressible._get_point_data(self, main_field)
+        point_data["Filtered gradient"] = self.filtered_gradient
         return point_data
 
 
@@ -118,7 +179,7 @@ class NeoHookeanIncompressibleStaggered(NeoHookeanIncompressible):
         NeoHookean._initialize_fields(self)
         self.p = fem.Function(self.V_p, name="incompressibility")
 
-    def forward(self):
+    def forward(self, save_jacobian=False, external_jacobian=None):
         F = self._deformation_gradient()
         C = self._right_cauchy_green(F=F)
         J = ufl.sqrt(ufl.det(C))
@@ -141,12 +202,29 @@ class NeoHookeanIncompressibleStaggered(NeoHookeanIncompressible):
             J_u = ufl.derivative(F_u, self.u, self.du)
 
             # Solve nonlinear problem
-            solve_nonlinear_problem(F_u, self.u, bcs=self.dirichlet_bcs, J=J_u, comm=self.mesh.comm)
+            res = solve_nonlinear_problem(
+                F_u,
+                self.u,
+                bcs=self.dirichlet_bcs,
+                J=J_u,
+                comm=self.mesh.comm,
+                logger=self.log,
+                snes_options=self.params.snes_options,
+                save_jacobian=save_jacobian,
+                external_jacobian=external_jacobian,
+            )
+            if save_jacobian:
+                return res[-1]
 
             # Project (J-1) into V_p then we have the increment of p
             dp = project(J - 1, self.V_p, "dp")
 
-            dp_norm = np.sqrt(self.mesh.comm.allreduce(fem.assemble_scalar(fem.form(ufl.inner(dp, dp) * ufl.dx)), op=MPI.SUM))
+            dp_norm = np.sqrt(
+                self.mesh.comm.allreduce(
+                    fem.assemble_scalar(fem.form(ufl.inner(dp, dp) * self.dx)),
+                    op=MPI.SUM,
+                )
+            )
             self.p.x.array[:] += kappa * dp.x.array[:]
 
             if dp_norm < 1e-100:

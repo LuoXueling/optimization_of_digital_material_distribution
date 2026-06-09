@@ -6,56 +6,41 @@ import numpy as np
 import matplotlib.pyplot as plt
 import copy
 import os
+from src.utils import project
+from src.solvers import solve_linear_problem
+from scipy.spatial import cKDTree
+from petsc4py import PETSc
+from petsc4py.PETSc import ScalarType
 
 
 class NeoHookeanTopoOpt(NeoHookean):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self._init_topo_opt()
 
+    def _init_topo_opt(self):
         # Defined optimized variable
-        self.filtered_gradient = fem.Function(self.V_e, name="Filtered gradient")
-
+        V_scalar = fem.functionspace(self.mesh, ("Lagrange", 1))
+        self.filtered_gradient = fem.Function(V_scalar, name="Filtered gradient")
         # Initialize optimization related variables
-        self._initial_strain_energy_density = None
-        self._initial_weight_constraint = None
         self.penalty = self.params.init_penalty
 
+    @property
+    def density(self):
+        return self.e if self.n_component == 1 else self.e[self.density_component_id]
+
+    @property
+    def density_component_id(self):
+        return 0
+
     def _objective_function(self):
-        if self._initial_strain_energy_density is None:
-            local_sed = fem.assemble_scalar(
-                fem.form(self._strain_energy_density() * self.dx)
-            )
-            self._initial_strain_energy_density = self.mesh.comm.allreduce(local_sed, op=MPI.SUM)
-        compliance = (
-            self._strain_energy_density()
-            / self._initial_strain_energy_density
-            * self.dx
+        return self._normalized_scalar_expression(
+            self._strain_energy_density() * self.dx, "stored_energy"
         )
-        softplus = lambda x: ufl.ln(1 + ufl.exp(10 * x)) / 10
-        if self._initial_weight_constraint is None:
-            local_wc = fem.assemble_scalar(
-                fem.form(softplus(self.e - self.params.target_volume) * self.dx)
-            )
-            self._initial_weight_constraint = self.mesh.comm.allreduce(local_wc, op=MPI.SUM)
-        weight = (
-            50
-            * softplus(self.e - self.params.target_volume)
-            / self._initial_weight_constraint
-            * self.dx
-        )
-        gray_level = 20 * self.e * (1.0 - self.e) * 4 / self.area * self.dx
 
-        local_compliance = fem.assemble_scalar(fem.form(compliance))
-        global_compliance = self.mesh.comm.allreduce(local_compliance, op=MPI.SUM)
-        local_weight = fem.assemble_scalar(fem.form(weight))
-        global_weight = self.mesh.comm.allreduce(local_weight, op=MPI.SUM)
-        local_gray = fem.assemble_scalar(fem.form(gray_level))
-        global_gray = self.mesh.comm.allreduce(local_gray, op=MPI.SUM)
-
-        self.log(
-            f"Compliance: {global_compliance}, Average density squared: {global_weight}, Gray level: {global_gray}"
-        )
-        return compliance + weight + gray_level
+    def _constraints(self):
+        volume = (self.density - self.params.target_volume) / self.area * self.dx
+        return [volume]
 
     def _initial_values(self):
         return np.array([1.0] * len(self.e.x.array))
@@ -63,79 +48,230 @@ class NeoHookeanTopoOpt(NeoHookean):
     def _bounds(self):
         return [(self.params.min_density, 1.0)] * len(self.e.x.array)
 
-    def _strain_energy_density(self, F=None, C=None, Eps=None):
-        to_3d = lambda x: (
-            ufl.as_tensor([[x[0, 0], x[0, 1], 0], [x[1, 0], x[1, 1], 0], [0, 0, 1]])
-            if self.params.dim == 2
-            else x
+    def _define_design_dirichlet_boundaries(
+        self,
+        fixed_value=1.0,
+        boundary_markers=None,
+        function_space=None,
+        fix_boundary_w_bc=True,
+        constrained_subspaces=None,
+    ):
+        """Define Dirichlet boundary conditions for density field on boundaries
+        where Neumann or Dirichlet BCs are applied to displacement field.
+        Includes DOFs within num_layers element layers from the boundary.
+        """
+        function_space = self.V_e if function_space is None else function_space
+
+        # If vector-valued, dispatch once per component
+        if function_space.dofmap.bs > 1:
+            e_bcs_all, g_bcs_all = [], []
+            if constrained_subspaces is None:
+                constrained_subspaces = range(function_space.dofmap.bs)
+            for comp in constrained_subspaces:
+                comp_space = function_space.sub(comp)
+                e_bcs, g_bcs = NeoHookeanTopoOpt._define_design_dirichlet_boundaries(
+                    self,
+                    fixed_value=fixed_value,
+                    boundary_markers=boundary_markers,
+                    function_space=comp_space,
+                    fix_boundary_w_bc=fix_boundary_w_bc,
+                )
+                e_bcs_all.extend(e_bcs)
+                g_bcs_all.extend(g_bcs)
+            return e_bcs_all, g_bcs_all
+
+        density_bcs, gradient_bcs = NeoHookean._define_design_dirichlet_boundaries(
+            self, function_space=function_space, fixed_value=fixed_value
         )
 
-        if Eps is None:
-            if F is None:
-                F = self._deformation_gradient()
-            if C is None:
-                C = self._right_cauchy_green(F=F)
-            F = to_3d(F)
-            C = to_3d(C)
-            J = ufl.det(F)
-        else:
-            C = 2.0 * Eps + ufl.Identity(len(self.u))
-            C = to_3d(C)
-            J = ufl.sqrt(ufl.det(C))
-        Ic = ufl.tr(C)
+        try:
+            V_collapsed, collapse_map = function_space.collapse()
+            collapse_map = np.array(collapse_map, dtype=np.int32)
+            is_subspace = True
+        except RuntimeError:
+            is_subspace = False
+            V_collapsed = function_space
 
-        # Elasticity parameters
-        degraded_E = self.e**self.penalty * self.params.E
-        # degraded_E = E
-        mu = degraded_E / (2 * (1 + self.params.nu))  # Lame second coefficient
-        lmbda = (
-            degraded_E
-            * self.params.nu
-            / (1 + self.params.nu)
-            / (1 - 2 * self.params.nu)
-        )  # Lame first coefficient
+        if self.params.fix_density_h is None:
+            return density_bcs, gradient_bcs
 
-        # Stored strain energy density (compressible neo-Hookean model)
-        psi = (mu / 2) * (Ic - 3) - mu * ufl.ln(J) + (lmbda / 2) * (ufl.ln(J)) ** 2
-        return psi
+        if not fix_boundary_w_bc and boundary_markers is None:
+            self.log(
+                f"Warning: No boundary to fix design. Pass either fix_boundary_w_bc=True or boundary_markers to _define_design_dirichlet_boundaries"
+            )
 
-    def grad(self, x):
-        grad = super().grad(x)
+        # Collect all boundary marker IDs from Neumann and Dirichlet BCs
+        boundary_markers = set() if boundary_markers is None else set(boundary_markers)
 
-        # Create temporary function for gradient to access ghost values
-        grad_func = fem.Function(self.V_e)
-        grad_func.x.array[:] = grad
-        grad_func.x.scatter_forward()
+        if fix_boundary_w_bc:
+            # Add Neumann BC markers
+            for marker_id, _ in self.neumann_bcs:
+                boundary_markers.add(marker_id)
 
-        # Deal with the gradient of density: filter method
-        coord = self.V_e.tabulate_dof_coordinates()
+            # Add Dirichlet BC markers
+            if self.params.dirichlet_bcs is not None:
+                for marker_id, _ in self.params.dirichlet_bcs:
+                    boundary_markers.add(marker_id)
+
+            # Add geometrically-defined Dirichlet BC markers
+            if self.params.dirichlet_bcs_dict is not None:
+                for i in range(len(self.params.dirichlet_bcs_dict)):
+                    marker_key = f"Config Dirichlet BC {i}"
+                    if marker_key in self.association_table:
+                        boundary_markers.add(self.association_table[marker_key])
+
+        # Get DOF coordinates (includes ghost DOFs for parallel safety)
+        dof_coords = V_collapsed.tabulate_dof_coordinates()
 
         # Get number of locally owned DOFs
-        num_owned = self.V_e.dofmap.index_map.size_local
+        num_owned = V_collapsed.dofmap.index_map.size_local
 
-        filtered_grad = copy.deepcopy(grad)
+        # Collect all boundary dofs (union across markers) and DOFs to fix
+        all_boundary_dofs = set()
+        all_dofs_to_fix = set()
 
-        # Only compute filtered gradient for locally owned DOFs
-        for p in range(num_owned):
-            p_pos = coord[p, :]
-            pdist2 = np.sqrt(
-                np.sum(
-                    (coord - np.repeat(p_pos.reshape(1, -1), coord.shape[0], axis=0))
-                    ** 2,
-                    axis=-1,
-                )
+        for marker_id in boundary_markers:
+            facets = self.boundaries.find(marker_id)
+
+            # Ensure necessary topology connectivity exists (both directions)
+            self.mesh.topology.create_connectivity(
+                self.mesh.topology.dim - 1, self.mesh.topology.dim
             )
-            within_filter = np.where(pdist2 <= self.params.r_min)[0]
-            distances = pdist2[within_filter]
-            grads = grad_func.x.array[within_filter]
-            densities = self.e.x.array[within_filter]
-            weights = self.params.r_min - distances
-            # if max(x[p] - np.min(densities), np.max(densities) - x[p]) > 0.1:
-            p_grad = np.sum(weights * densities * grads) / (self.e.x.array[p] * np.sum(weights))
-            filtered_grad[p] = p_grad
 
-        filtered_grad = np.clip(filtered_grad, a_min=-0.2, a_max=0.2)
-        grad = filtered_grad
+            # Call collectively on all ranks (even if local facets array is empty)
+            boundary_dofs = fem.locate_dofs_topological(
+                V_collapsed, self.mesh.topology.dim - 1, facets
+            )
+
+            # Accumulate union of boundary DOFs (may include ghost DOFs)
+            all_boundary_dofs.update(boundary_dofs.tolist())
+
+        # Perform a single radius query with the union of boundary DOFs
+        boundary_coords = dof_coords[np.fromiter(all_boundary_dofs, dtype=np.int32)]
+        search_distance = float(self.params.fix_density_h)
+
+        # Build KD-tree once for efficient radius queries
+        kd_tree = cKDTree(dof_coords)
+
+        neighbor_lists = kd_tree.query_ball_point(boundary_coords, r=search_distance)
+        for lst in neighbor_lists:
+            for idx in lst:
+                if idx < num_owned:  # keep only locally owned dofs
+                    all_dofs_to_fix.add(idx)
+
+        # Create BCs with all collected DOFs (only locally owned)
+        dofs_array = np.array(list(all_dofs_to_fix), dtype=np.int32)
+        dofs_array_parent = collapse_map[dofs_array] if is_subspace else dofs_array
+
+        if fixed_value is not None:
+            # Create BC for density with fixed value 1.0
+            if len(all_dofs_to_fix) > 0:
+                bc_density = fem.dirichletbc(
+                    ScalarType(fixed_value),
+                    dofs_array_parent,
+                    function_space if is_subspace else V_collapsed,
+                )
+                density_bcs.append(bc_density)
+
+        # Create BC for gradient with fixed value 0.0
+        if len(all_dofs_to_fix) > 0:
+            bc_gradient = fem.dirichletbc(
+                ScalarType(0.0),
+                dofs_array_parent,
+                function_space if is_subspace else V_collapsed,
+            )
+            gradient_bcs.append(bc_gradient)
+
+        # Parallel-safe: sum across all processes
+        total_dofs_fixed = self.mesh.comm.allreduce(len(all_dofs_to_fix), op=MPI.SUM)
+        self.log(f"Created density Dirichlet BCs fixing {total_dofs_fixed} DOFs")
+        return density_bcs, gradient_bcs
+
+    @property
+    def _degradation(self):
+        return self.density**self.penalty
+
+    def _strain_energy_density(self, F=None, C=None, Eps=None):
+        return self._degradation * super()._strain_energy_density(F=F, C=C, Eps=Eps)
+
+    def _body_force_energy(self):
+        if self.params.body_force_applied_on == "deformed":
+            _, J, _, _ = self.strain_invariant()
+            return self.density * ufl.dot(J * self.B, self.u) * self.dx
+        elif self.params.body_force_applied_on == "reference":
+            return self.density * ufl.dot(self.B, self.u) * self.dx
+        else:
+            raise Exception(
+                f"Forces are applied on either deformed or reference configuration."
+            )
+
+    def grad(self, x=None):
+        grad = super().grad(x)
+        if self.n_component == 1:
+            V_dens = self.V_e
+            collapse_map = None
+        else:
+            V_dens, collapse_map = self.V_e.sub(self.density_component_id).collapse()
+
+        if self.params.gradient_filter:
+            # Create temporary function for gradient to access ghost values
+            grad_func = fem.Function(V_dens)
+            grad_func.x.array[:] = grad if collapse_map is None else grad[collapse_map]
+            grad_func.x.scatter_forward()
+
+            dens_func = fem.Function(V_dens)
+            dens_func.x.array[:] = (
+                self.e.x.array if collapse_map is None else self.e.x.array[collapse_map]
+            )
+            dens_func.x.scatter_forward()
+
+            # Deal with the gradient of density: filter method (sparse KD-tree approach)
+            coord = V_dens.tabulate_dof_coordinates()
+            num_owned = V_dens.dofmap.index_map.size_local
+
+            # Build KD-tree for efficient neighbor search
+            tree = cKDTree(coord)
+
+            # Query neighbors within r_min for each owned DOF
+            owned_coords = coord[:num_owned, :]
+            neighbors_list = tree.query_ball_point(
+                owned_coords, self.params.gradient_filter
+            )
+
+            # Compute filtered gradient using sparse approach
+            filtered_grad = grad_func.x.array[:]
+
+            for p in range(num_owned):
+                neighbor_indices = neighbors_list[p]
+                if len(neighbor_indices) == 0:
+                    continue
+
+                # Get neighbor coordinates, distances, and values
+                neighbor_coords = coord[neighbor_indices]
+                distances = np.linalg.norm(neighbor_coords - owned_coords[p], axis=1)
+
+                # Compute weights
+                weights = self.params.gradient_filter - distances
+
+                # Get gradient and density values at neighbors
+                grads = grad_func.x.array[neighbor_indices]
+                densities = dens_func.x.array[neighbor_indices]
+
+                # Weighted average
+                numerator = np.sum(weights * densities * grads)
+                denominator = dens_func.x.array[p] * np.sum(weights)
+
+                if denominator > 1e-12:
+                    filtered_grad[p] = numerator / denominator
+            if collapse_map is None:
+                grad[:num_owned] = filtered_grad[:num_owned]
+            else:
+                grad[collapse_map[:num_owned]] = filtered_grad[:num_owned]
+        else:
+            filtered_grad = copy.deepcopy(
+                grad if collapse_map is None else grad[collapse_map]
+            )
+
         self.filtered_gradient.x.array[:] = filtered_grad
         self.filtered_gradient.x.scatter_forward()
         return grad
@@ -145,32 +281,135 @@ class NeoHookeanTopoOpt(NeoHookean):
         if self._optimize_step % self.params.output_per_step == 0:
             self.save(time=self._optimize_step)
         self._optimize_step += 1
-        if len(self._loss_history) > 1 and (
-            0
-            < (1 - self._loss_history[-1] / self._loss_history[-2])
-            < self.params.relative_tol
-            or (
-                len(self._stage_loss_history) > 10
-                and self._stage_loss_history[-10] == min(self._stage_loss_history[-10:])
+        if len(self._loss_history) > 2:
+            self.log(
+                f"Convergence criterion: {(1 - self._loss_history[-1] / self._loss_history[-2])
+                * np.sign(self._loss_history[-1])} < {self.params.relative_tol}"
             )
-        ):
-            if (self.penalty == self.params.init_penalty) or (
-                self.params.init_penalty < self.penalty < self.params.max_penalty
+            if len(self._loss_history) < 20:
+                self.log("Convergence criterion ignored before 20 iterations.")
+            elif (1 - self._loss_history[-1] / self._loss_history[-2]) * np.sign(
+                self._loss_history[-1]
+            ) > (1 - self._loss_history[-2] / self._loss_history[-3]) * np.sign(
+                self._loss_history[-2]
             ):
-                local_gray = fem.assemble_scalar(fem.form(self.e * (1.0 - self.e) * self.dx))
-                gray_level = self.mesh.comm.allreduce(local_gray, op=MPI.SUM) * 4 / self.area
-                self.penalty = min(
-                    self.penalty * (1 + 0.3 ** (1 + gray_level / 2)),
-                    self.params.max_penalty,
+                self.log(
+                    "Loss reduction keeps increasing and convergence criterion is ignored"
                 )
-                self._stage_loss_history = []
-                self.log(f"Updated penalty to {self.penalty}")
-            elif self.penalty >= self.params.max_penalty:
-                self.log(f"Reached maximum penalty and converged. ")
-                return True
+            elif (
+                0
+                < (1 - self._loss_history[-1] / self._loss_history[-2])
+                * np.sign(self._loss_history[-1])
+                < self.params.relative_tol
+                and 0
+                < (1 - self._loss_history[-2] / self._loss_history[-3])
+                * np.sign(self._loss_history[-2])
+                < self.params.relative_tol
+            ) or (
+                len(self._stage_loss_history) > 500
+                and self._stage_loss_history[-50] == min(self._stage_loss_history[-50:])
+            ):
+                if (
+                    self.penalty == self.params.init_penalty
+                    and self.params.init_penalty != self.params.max_penalty
+                ) or (
+                    self.params.init_penalty < self.penalty < self.params.max_penalty
+                ):
+                    gray_level = self._assemble_scalar_parallel(
+                        self.density * (1.0 - self.density) * 4 / self.area * self.dx
+                    )
+                    self.penalty = min(
+                        self.penalty * (1 + 0.2 ** (1 + gray_level / 2)),
+                        self.params.max_penalty,
+                    )
+                    self._stage_loss_history = []
+                    self.log(f"Updated penalty to {self.penalty}")
+                elif self.penalty >= self.params.max_penalty:
+                    self.log(f"Reached maximum penalty and converged. ")
+                    return True
         return False
 
     def _get_point_data(self, main_field=None):
         point_data = super()._get_point_data(main_field)
         point_data["Filtered gradient"] = self.filtered_gradient
         return point_data
+
+    def _get_cell_data(self):
+        cell_data = super()._get_cell_data()
+        scalar_space = fem.functionspace(self.mesh, ("DG", 0))
+
+        grad_projected = project(
+            self.filtered_gradient, scalar_space, "Gradient_projected"
+        )
+        cell_data["Gradient_projected"] = grad_projected
+        return cell_data
+
+
+class NeoHookeanPDEFilteredTopoOpt(NeoHookeanTopoOpt):
+    """
+    Applies Helmholtz PDE filtering and tanh projection in-place on self.e
+    after every design update. The optimized variables correspond to the
+    density DOFs; gradients are not filtered.
+    """
+
+    @property
+    def density(self):
+        raw_density = (
+            self.e if self.n_component == 1 else self.e[self.density_component_id]
+        )
+        beta = 3.0
+        eta = 0.5
+        num = ufl.tanh(beta * eta) + ufl.tanh(beta * (raw_density - eta))
+        den = ufl.tanh(beta * eta) + ufl.tanh(beta * (1.0 - eta))
+        proj = num / den
+        return proj
+
+    def grad(self, x=None):
+        return NeoHookean.grad(self, x)
+
+    def _initial_values(self):
+        x0 = np.zeros(len(self.e.x.array))
+        if (
+            self.params.filter_radius is None
+            or self._filter_vars[self.density_component_id]["map"] is None
+        ):
+            x0[:] = 1.0
+        else:
+            x0[self._filter_vars[self.density_component_id]["map"]] = 1.0
+        return x0
+
+    def _bounds(self):
+        bnds = [(-np.inf, np.inf)] * len(self.e.x.array)
+        if (
+            self.params.filter_radius is None
+            or self._filter_vars[self.density_component_id]["map"] is None
+        ):
+            for i in range(len(bnds)):
+                bnds[i] = (self.params.min_density, 1.0)
+        else:
+            for idx in self._filter_vars[self.density_component_id]["map"]:
+                bnds[idx] = (self.params.min_density, 1.0)
+        return bnds
+
+    @property
+    def _degradation(self):
+        return self.density**self.penalty
+
+    def _optimize_callback(self, *args) -> bool:
+        return NeoHookeanTopoOpt._optimize_callback(self, *args)
+
+    def _get_point_data(self, main_field=None):
+        point_data = NeoHookeanTopoOpt._get_point_data(self, main_field)
+        scalar_space = fem.functionspace(self.mesh, ("CG", 1))
+        density_projected = project(self.density, scalar_space, "density_projected")
+        point_data["density_projected"] = density_projected
+        return point_data
+
+    def _get_cell_data(self):
+        return NeoHookean._get_cell_data(self)
+
+    def _define_design_dirichlet_boundaries(self, *args, **kwargs):
+        kwargs.update(dict(fixed_value=1.0))
+        return NeoHookeanTopoOpt._define_design_dirichlet_boundaries(
+            self, *args, **kwargs
+        )

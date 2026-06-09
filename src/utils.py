@@ -7,99 +7,47 @@ import dolfinx.fem as fem
 import ufl
 
 
-def redirect_stdout_to_log(log_file_path):
-    """
-    Redirect stdout to both terminal and log file, stripping ANSI color codes from log file.
-
-    Returns:
-        tuple: (old_stdout_fd, log_file_info) to be passed to restore_stdout_from_log()
-    """
-    import os
-    import threading
-    import re
-
-    old_stdout_fd = os.dup(1)  # Save original stdout fd
-
-    def tee_with_ansi_strip(input_fd, output_fd, log_path):
-        # Use bytes pattern for bytes data
-        ansi_escape = re.compile(rb"\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])")
-        try:
-            with os.fdopen(input_fd, "rb", buffering=0) as inp, os.fdopen(
-                output_fd, "wb", buffering=0
-            ) as out, open(log_path, "ab", buffering=0) as log:
-                while True:
-                    data = inp.read(1024)
-                    if not data:
-                        break
-                    out.write(data)  # Write to terminal with colors
-                    out.flush()
-                    # Strip ANSI codes for log file
-                    cleaned = ansi_escape.sub(b"", data)
-                    log.write(cleaned)
-                    log.flush()
-        except Exception as e:
-            pass  # Silently ignore errors during cleanup
-
-    # Create pipe for capturing
-    r, w = os.pipe()
-
-    # Start thread to tee the output
-    tee_thread = threading.Thread(
-        target=tee_with_ansi_strip, args=(r, old_stdout_fd, log_file_path), daemon=False
-    )
-    tee_thread.start()
-
-    # Redirect stdout to write end (after thread starts)
-    os.dup2(w, 1)
-
-    return old_stdout_fd, (tee_thread, w, r)
-
-
-def restore_stdout_from_log(old_stdout_fd, log_file_info):
-    """
-    Restore stdout to original state after redirect_stdout_to_log().
-
-    Args:
-        old_stdout_fd: The original stdout file descriptor
-        log_file_info: The tuple returned by redirect_stdout_to_log()
-    """
-    import os
-    import sys
-
-    sys.stdout.flush()
-    tee_thread, write_fd, read_fd = log_file_info
-
-    # Restore stdout to original FIRST (before closing pipe)
-    os.dup2(old_stdout_fd, 1)
-
-    # Close the write end - this signals EOF when we close it
-    os.close(write_fd)
-
-    # Wait for thread to finish reading (it's using old_stdout_fd)
-    tee_thread.join(timeout=5.0)
-
-    # Now we can safely close the read end and saved fd
-    try:
-        os.close(read_fd)
-    except OSError:
-        pass  # Thread may have already closed it
-
-    try:
-        os.close(old_stdout_fd)
-    except OSError:
-        pass  # May already be closed by thread's fdopen context manager
-
-
 def project(expression, target_space, name="projected"):
-    from dolfinx.fem.petsc import LinearProblem
+    from dolfinx.fem.petsc import assemble_matrix, assemble_vector
+    from petsc4py import PETSc
 
+    mesh = target_space.mesh
+
+    u = ufl.TrialFunction(target_space)
     v = ufl.TestFunction(target_space)
     u_proj = fem.Function(target_space, name=name)
-    a = ufl.inner(ufl.TrialFunction(target_space), v) * ufl.dx
-    L = ufl.inner(expression, v) * ufl.dx
 
-    problem = LinearProblem(a, L)
-    u_proj = problem.solve()
+    dx_proj = ufl.dx(metadata={"quadrature_degree": 2})
+
+    a = fem.form(ufl.inner(u, v) * dx_proj)
+    L = fem.form(ufl.inner(expression, v) * dx_proj)
+
+    A = assemble_matrix(a)
+    A.assemble()
+
+    b = assemble_vector(L)
+    b.ghostUpdate(addv=PETSc.InsertMode.ADD, mode=PETSc.ScatterMode.REVERSE)
+
+    solver = PETSc.KSP().create(mesh.comm)
+    solver.setOperators(A)
+    solver.setType("cg")
+    solver.getPC().setType("jacobi")
+    solver.setTolerances(rtol=1e-10, atol=1e-10, max_it=1000)
+
+    solver.solve(b, u_proj.x.petsc_vec)
+    u_proj.x.scatter_forward()
+
+    # Clean up PETSc objects to avoid MPI communicator leak
+    pc = solver.getPC()
+    pc.destroy()
+    solver.destroy()
+    A.destroy()
+    b.destroy()
+
+    # Cleanup after project (called frequently in topology optimization)
+    import gc
+    gc.collect()
+
     u_proj.name = name
     return u_proj
 
