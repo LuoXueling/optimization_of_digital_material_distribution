@@ -2,7 +2,7 @@
 
 ## Installation
 
-This repo is built upon Python 3.12 and FEniCSx (DOLFINx)
+This repo is built upon Python 3.12 and FEniCSx (DOLFINx), in an Anaconda environment. We also use gmsh GUI for mesh generation, and Paraview for visualization.
 
 ```shell
 conda create -n fenicsx python=3.12
@@ -16,17 +16,23 @@ conda install -c conda-forge adios2 adios4dolfinx=0.9.5
 
 ### Implemented methods
 
-* `src/neoHookean.py` implements a neo-Hookean model and a basic optimization framework as the foundation of all other implementations. 
-* `src/neoHookean_topo_opt.py` implements a simple implementation of adjoint-state-method-based SIMP topology optimization for a neo-Hookean model. 
-* `src/neoHookean_incompressible.py` implements the incompressible neo-Hookean model using coupled u-p scheme and staggered (augmented Lagrange) scheme.
+* `src/neoHookean.py` implements a neo-Hookean model and a basic optimization framework with Helmholtz filtering as the foundation of all other implementations. 
+* `src/neoHookean_topo_opt.py` implements the adjoint-state-method-based SIMP topology optimization for a neo-Hookean model. 
+* `src/neoHookean_tmc.py` implements the third medium contact approach for contact problems. 
+* `src/steven.py` implements the pICNN-based constitutive model in our previous work ([10.1016/j.ijengsci.2025.104381](10.1016/j.ijengsci.2025.104381)) for digital materials. 
 
 ### Configuration and execution
 
-Default parameters are in `default_config.py`. Copy `default_config.py` to another config file (e.g., `config.py`) and modify parameters there.
+All commands we used to generate results in the paper are in `command_lines.sh`, which will guide you to the corresponding `main_*.py` files that define the optimization problem and logic using interfaces defined in parent classes, and also the mesh and configuration files in `mesh/` folder. 
 
-#### Example: neo-Hookean
+Default parameters are in `src/default_config.py`. Write your own `config.py` to override the default parameters. Surfaces where boundary conditions are applied and domains to be designed or frozen can be either defined by lambda functions or predefined in gmsh mesh files by "Physical groups". Finally, run a main script. 
 
-Here is an example of solving a neo-Hookean body with dirichlet boundaries and neumann boundaries:
+Here are two examples of solving or optimizing a neo-Hookean body with dirichlet boundaries and neumann boundaries, from which you can see how easily it is to set up a problem with our implementation:
+
+<details>
+<summary>
+Example: Neo-Hookean with Dirichlet and Neumann boundaries
+</summary>
 
 Generate a 2D triangular mesh using `gmsh`, with boundaries defined in "Physical groups" as "Curve", namely "upper" and "right", and the domain defined as "Surface", namely "main". The mesh is `mesh/square.geo` and `mesh/square.msh`.
 
@@ -84,7 +90,12 @@ problem.forward()
 problem.save()
 ```
 
-#### Example: Topology optimization for neo-Hookean
+</details>
+
+<details>
+<summary>
+Example: Topology optimization for neo-Hookean
+</summary>
 
 This example generates mesh and define Dirichlet and Neumann boundaries using FEniCSx itself instead of using `gmsh`.
 
@@ -118,8 +129,9 @@ params = dotdict(
     filter_radius=0.01,
     clip_gradient=0.02,
     output_per_step=1,
-    maxiter=10000,
+    maxiter=100,
     fix_density_h=None,
+    optimizer="MMA",
     # fix_design_domain="left_half",
     # Solver settings
     relative_tol=0.0001,
@@ -136,7 +148,7 @@ params = dotdict(
     # Elasticity parameters
     c=1.0,
     E=10.0,
-    nu=0.49,
+    nu=0.3,
     kr_coef=1e-4,
 )
 
@@ -164,7 +176,7 @@ params.update(
             lambda x: np.isclose(x[0], params.width)
             & np.isclose(x[1], 0, atol=params.mesh_size * 1.1): (
                 0.0,
-                -0.001,
+                -0.01,
             ),  # Modify for 3D
         },
     )
@@ -181,3 +193,4 @@ problem = NeoHookeanPDEFilteredTopoOpt(config_path="config.py")
 problem.optimize()
 ```
 
+</details>
