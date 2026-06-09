@@ -168,10 +168,10 @@ class StevenTopoOptI1(StevenTopoOpt):
         I1_crit = 0.22426408 * c**2 - 1.12468456 * c + 4.883886
         I1, _, _, _ = self.strain_invariant()
 
-        smooth = 100
+        smooth = 0.01
         softplus = lambda x: ufl.conditional(
             ufl.lt(x, 1),
-            ufl.ln(1 + ufl.exp(x * smooth)) / smooth,
+            ufl.ln(1 + ufl.exp(x / smooth)) * smooth,
             x,
         )
 
@@ -186,57 +186,19 @@ class StevenTopoOptI1(StevenTopoOpt):
         # density = project(self.density, scalar_space, "isolated_density")
 
         safety_factor = 15
-        return 5 * self._normalized_scalar_expression(
-            self._degradation
-            * softplus((I1 - 3) * safety_factor - (I1_crit - 3))
-            * self.dx,
-            "I1_crit",
+        return (
+            softplus(ufl.sqrt(self.density) * (I1 - 3) * safety_factor - (I1_crit - 3))
+        ) * self.dx
+
+    def _objective_function(self):
+        return self._normalized_scalar_expression(
+            self._strain_energy_density() * self.dx, "stored_energy"
         )
 
-    def _objective_function_value(self):
-        stored_energy = self._stored_energy()
-        stored_energy_val = 1 + self._assemble_scalar_parallel(stored_energy)
-
-        softplus = lambda x: np.log(1 + np.exp(100 * x)) / 100
-        weight = self._weight_diff()
-        weight_val = self.params.get("volume_cons_weight", 10.0) * softplus(
-            self._assemble_scalar_parallel(weight)
-        )
-
-        I1_crit = self.critical_I1()
-        I1_crit_val = self._assemble_scalar_parallel(I1_crit)
-
-        energy_current = self._assemble_scalar_parallel(
-            self._strain_energy_density() * self.dx
-        )
-        weight_current = self._assemble_scalar_parallel(
-            self.density / self.area * self.dx
-        )
-
-        self.log(
-            f"Stored energy: {stored_energy_val}, weight constraint: {weight_val}, I1 constraint: {I1_crit_val}"
-        )
-        self.log(f"Current energy: {energy_current}")
-        self.log(f"Current weight: {weight_current} ({self.params.target_volume})")
-        return stored_energy_val + weight_val + I1_crit_val
-
-    def _grad_j_state(self, j, state, state_test):
-        stored_energy = self._stored_energy()
-        I1_crit = self.critical_I1()
-        return ufl.derivative(stored_energy + I1_crit, state, state_test)
-
-    def _grad_j_opt(self, j, opt, opt_test):
-        stored_energy = self._stored_energy()
-        I1_crit = self.critical_I1()
-        weight_diff_form = self._weight_diff()
-        softplus_diff = (
-            self.params.get("volume_cons_weight", 10.0)
-            * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
-                self._assemble_scalar_parallel(weight_diff_form)
-            )
-            * ufl.derivative(weight_diff_form, opt, opt_test)
-        )
-        return ufl.derivative(stored_energy + I1_crit, opt, opt_test) + softplus_diff
+    def _constraints(self):
+        volume = (self.density - self.params.target_volume) / self.area * self.dx
+        I_1 = self.critical_I1()
+        return [volume, I_1]
 
 
 class StevenDistTopoOpt(StevenTopoOpt):
@@ -267,64 +229,29 @@ class StevenDistTopoOpt(StevenTopoOpt):
             bnds[idx] = (0.0, 1.0)
         return bnds
 
-    def _gradient_norm_c(self):
-        thres = 3000
-        smooth = 400
+    def _objective_function(self):
+        thres = 150
+        smooth = thres / 10
         softplus = lambda x: ufl.conditional(
             ufl.lt(x, thres * 10),
             ufl.ln(1 + ufl.exp(x / smooth)) * smooth,
             x,
         )
-        c = self._get_c()
-        grad_c = ufl.grad(c)
+        grad_e = ufl.grad(self.e)
         grad_norm = (
-            softplus(ufl.dot(grad_c, grad_c) - thres) - softplus(0.0 - thres)
+            softplus(ufl.dot(grad_e, grad_e) - thres) - softplus(0.0 - thres)
         ) * self.dx_grad
-        return grad_norm
 
-    def _objective_function_value(self):
-        stored_energy = self._stored_energy()
-        stored_energy_val = 1 + self._assemble_scalar_parallel(stored_energy)
-
-        softplus = lambda x: np.log(1 + np.exp(100 * x)) / 100
-        weight = self._weight_diff()
-        weight_val = self.params.get("volume_cons_weight", 10.0) * softplus(
-            self._assemble_scalar_parallel(weight)
-        )
-
-        grad_norm = self._gradient_norm_c()
-        grad_norm_val = self._assemble_scalar_parallel(grad_norm)
-
-        energy_current = self._assemble_scalar_parallel(
-            self._strain_energy_density() * self.dx
-        )
-        weight_current = self._assemble_scalar_parallel(
-            self.density / self.area * self.dx
-        )
-
-        self.log(
-            f"Stored energy: {stored_energy_val}, weight constraint: {weight_val}, gradient norm: {grad_norm_val}"
-        )
-        self.log(f"Current energy: {energy_current}")
-        self.log(f"Current weight: {weight_current} ({self.params.target_volume})")
-        return stored_energy_val + weight_val + grad_norm_val
-
-    def _grad_j_state(self, j, state, state_test):
-        stored_energy = self._stored_energy()
-        return ufl.derivative(stored_energy, state, state_test)
-
-    def _grad_j_opt(self, j, opt, opt_test):
-        stored_energy = self._stored_energy()
-        weight_diff_form = self._weight_diff()
-        grad_norm = self._gradient_norm_c()
-        softplus_diff = (
-            self.params.get("volume_cons_weight", 10.0)
-            * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
-                self._assemble_scalar_parallel(weight_diff_form)
+        return (
+            self._normalized_scalar_expression(
+                self._strain_energy_density() * self.dx, "stored_energy"
             )
-            * ufl.derivative(weight_diff_form, opt, opt_test)
+            + grad_norm
         )
-        return ufl.derivative(stored_energy + grad_norm, opt, opt_test) + softplus_diff
+
+    def _constraints(self):
+        volume = (self.density - self.params.target_volume) / self.area * self.dx
+        return [volume]
 
     def _define_design_dirichlet_boundaries(self, *args, **kwargs):
         kwargs.update(dict(constrained_subspaces=[self.density_component_id]))
@@ -332,57 +259,10 @@ class StevenDistTopoOpt(StevenTopoOpt):
 
 
 class StevenDistTopoOptI1(StevenDistTopoOpt):
-    def _objective_function_value(self):
-        stored_energy = self._stored_energy()
-        stored_energy_val = 1 + self._assemble_scalar_parallel(stored_energy)
-
-        softplus = lambda x: np.log(1 + np.exp(100 * x)) / 100
-        weight = self._weight_diff()
-        weight_val = self.params.get("volume_cons_weight", 10.0) * softplus(
-            self._assemble_scalar_parallel(weight)
-        )
-
-        I1_crit = StevenTopoOptI1.critical_I1(self)
-        I1_crit_val = self._assemble_scalar_parallel(I1_crit)
-
-        grad_norm = self._gradient_norm_c()
-        grad_norm_val = self._assemble_scalar_parallel(grad_norm)
-
-        energy_current = self._assemble_scalar_parallel(
-            self._strain_energy_density() * self.dx
-        )
-        weight_current = self._assemble_scalar_parallel(
-            self.density / self.area * self.dx
-        )
-
-        self.log(
-            f"Stored energy: {stored_energy_val}, weight constraint: {weight_val}, I1 constraint: {I1_crit_val}, gradient norm: {grad_norm_val}"
-        )
-        self.log(f"Current energy: {energy_current}")
-        self.log(f"Current weight: {weight_current} ({self.params.target_volume})")
-        return stored_energy_val + weight_val + I1_crit_val + grad_norm_val
-
-    def _grad_j_state(self, j, state, state_test):
-        stored_energy = self._stored_energy()
-        I1_crit = StevenTopoOptI1.critical_I1(self)
-        return ufl.derivative(stored_energy + I1_crit, state, state_test)
-
-    def _grad_j_opt(self, j, opt, opt_test):
-        stored_energy = self._stored_energy()
-        I1_crit = StevenTopoOptI1.critical_I1(self)
-        weight_diff_form = self._weight_diff()
-        grad_norm = self._gradient_norm_c()
-        softplus_diff = (
-            self.params.get("volume_cons_weight", 10.0)
-            * (lambda x: np.exp(100 * x) / (1 + np.exp(100 * x)))(
-                self._assemble_scalar_parallel(weight_diff_form)
-            )
-            * ufl.derivative(weight_diff_form, opt, opt_test)
-        )
-        return (
-            ufl.derivative(stored_energy + I1_crit + grad_norm, opt, opt_test)
-            + softplus_diff
-        )
+    def _constraints(self):
+        volume = (self.density - self.params.target_volume) / self.area * self.dx
+        I_1 = self.critical_I1()
+        return [volume, I_1]
 
 
 if __name__ == "__main__":

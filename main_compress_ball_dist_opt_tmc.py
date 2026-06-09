@@ -4,7 +4,6 @@ from argparse import ArgumentParser
 from src.neoHookean import NeoHookean
 from src.neoHookean_topo_opt import (
     NeoHookeanTopoOpt,
-    NeoHookeanMappedTopoOpt,
     NeoHookeanPDEFilteredTopoOpt,
 )
 from src.neoHookean_tmc import NeoHookeanTMC
