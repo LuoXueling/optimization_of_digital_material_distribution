@@ -1,5 +1,7 @@
 # Optimization of digital material distribution
 
+This repository 
+
 ## Installation
 
 This repo is built upon Python 3.12 and FEniCSx (DOLFINx), in an Anaconda environment. We also use gmsh GUI for mesh generation, and Paraview for visualization.
