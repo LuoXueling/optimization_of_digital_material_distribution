@@ -175,6 +175,13 @@ class NeoHookean:
         A = fem.petsc.assemble_matrix(_filter_a)
         A.assemble()
         _filter_mat = A
+        # Explicit mass matrix M (=u*v*dx), reused to apply the filter transpose
+        # M*K^-1 in the gradient path (the discrete adjoint of the forward
+        # filter K^-1*M).
+        _mass_form = fem.form(u * _filter_v * dx)
+        M = fem.petsc.assemble_matrix(_mass_form)
+        M.assemble()
+        _mass_mat = M
         _phi_tmp = fem.Function(
             self._filter_vars[component_id]["V"], name="DesignInput"
         )
@@ -188,6 +195,7 @@ class NeoHookean:
             {
                 "a": _filter_a,
                 "mat": _filter_mat,
+                "mass_mat": _mass_mat,
                 "phi_tmp": _phi_tmp,
                 "rhs_form": _filter_rhs_form,
                 "rhs": _filter_rhs,
@@ -252,6 +260,77 @@ class NeoHookean:
         for comp_id in range(self.n_component):
             x = self._apply_filter(x, component_id=comp_id, clip=clip)
         return x
+
+    def _apply_filter_adjoint(self, g_array, component_id):
+        """Apply the transpose of the forward filter to a sensitivity vector.
+
+        The forward filter is F = K^-1 M (see ``_apply_filter``). Its discrete
+        adjoint, required by the chain rule for the gradient, is
+        F^T = M^T K^-T = M K^-1 (K, M symmetric). This routine therefore solves
+        K w = g (with g used directly as the RHS vector, *without* the mass
+        multiply) and then returns M w.
+        """
+        rf = self.params.filter_radius
+        if isinstance(rf, list) or isinstance(rf, tuple):
+            rf = rf[component_id]
+        if rf is None:
+            self.log(
+                f"No filter applied for component {component_id} since filter_radius is None"
+            )
+            return g_array
+        self.log(f"Applying filter adjoint")
+        m = self._filter_vars[component_id]["map"]
+        if m is None:
+            src = g_array
+        else:
+            src = g_array[m]
+        n_local = self._filter_vars[component_id]["V"].dofmap.index_map.size_local
+
+        # Build the raw RHS vector b = g (no mass-matrix multiply)
+        with self._filter_vars[component_id]["rhs"].localForm() as loc:
+            loc.set(0.0)
+        self._filter_vars[component_id]["rhs"].array[:n_local] = src[:n_local]
+        self._filter_vars[component_id]["rhs"].ghostUpdate(
+            addv=PETSc.InsertMode.INSERT, mode=PETSc.ScatterMode.FORWARD
+        )
+
+        # Solve K w = g
+        solve_linear_problem(
+            self._filter_vars[component_id]["a"],
+            self._filter_vars[component_id]["rhs_form"],
+            self._filter_vars[component_id]["solution"],
+            bcs=[],
+            linear_solver="mumps",
+            comm=self.mesh.comm,
+            A_cache=self._filter_vars[component_id]["mat"],
+            b_cache=self._filter_vars[component_id]["rhs"],
+            logger=self.log,
+        )
+
+        # Multiply by the mass matrix: out = M w. The matrix-vector product
+        # yields correct values on owned dofs; route them through the cached
+        # Function and scatter_forward so ghost dofs are made consistent before
+        # we read the local array.
+        w_vec = self._filter_vars[component_id]["solution"].x.petsc_vec
+        out_vec = w_vec.duplicate()
+        self._filter_vars[component_id]["mass_mat"].mult(w_vec, out_vec)
+        self._filter_vars[component_id]["phi_tmp"].x.array[:n_local] = out_vec.array[
+            :n_local
+        ]
+        self._filter_vars[component_id]["phi_tmp"].x.scatter_forward()
+        out_local = self._filter_vars[component_id]["phi_tmp"].x.array
+        if m is None:
+            result = out_local.copy()
+        else:
+            result = g_array.copy()
+            result[m] = out_local
+        out_vec.destroy()
+        return result
+
+    def _filter_all_adjoint(self, g):
+        for comp_id in range(self.n_component):
+            g = self._apply_filter_adjoint(g, component_id=comp_id)
+        return g
 
     def save_checkpoint(self, filename: str | None = None):
         try:
@@ -1063,7 +1142,7 @@ class NeoHookean:
             pass
 
         if self.params.filter_radius is not None:
-            grad_unfiltered = [self._filter_all(grad, clip=False) for grad in grad_ls]
+            grad_unfiltered = [self._filter_all_adjoint(grad) for grad in grad_ls]
             return grad_unfiltered
         else:
             return grad_ls
