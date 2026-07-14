@@ -1,6 +1,6 @@
 # Optimization of digital material distribution
 
-This repository 
+This repository contains the code for the paper "Towards end-to-end optimization in multimaterial 3D printing" [LINK TO BE UPDATED], authored by Xue-Ling Luo, Steven Yang, Jingye Tan, Robert F. Shepherd, Noy Cohen, and Nikolaos Bouklas.
 
 ## Installation
 
@@ -16,12 +16,6 @@ conda install -c conda-forge adios2 adios4dolfinx=0.9.5
 
 ## Usage
 
-### Implemented methods
-
-* `src/neoHookean.py` implements a neo-Hookean model and a basic optimization framework with Helmholtz filtering as the foundation of all other implementations. 
-* `src/neoHookean_topo_opt.py` implements the adjoint-state-method-based SIMP topology optimization for a neo-Hookean model. 
-* `src/neoHookean_tmc.py` implements the third medium contact approach for contact problems. 
-* `src/steven.py` implements the pICNN-based constitutive model in our previous work ([10.1016/j.ijengsci.2025.104381](10.1016/j.ijengsci.2025.104381)) for digital materials. 
 
 ### Configuration and execution
 
@@ -196,3 +190,11 @@ problem.optimize()
 ```
 
 </details>
+
+### Implemented methods
+
+* `src/neoHookean.py` implements a neo-Hookean model and a basic optimization framework with Helmholtz filtering as the foundation of all other implementations. 
+* `src/neoHookean_topo_opt.py` implements the adjoint-state-method-based SIMP topology optimization for a neo-Hookean model. 
+* `src/neoHookean_tmc.py` implements the third medium contact approach for contact problems. 
+* `src/steven.py` implements the pICNN-based constitutive model in our previous work ([10.1016/j.ijengsci.2025.104381](10.1016/j.ijengsci.2025.104381)) for digital materials. 
+
