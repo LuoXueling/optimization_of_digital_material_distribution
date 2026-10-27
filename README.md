@@ -14,12 +14,39 @@ conda install -c conda-forge gmsh python-gmsh matplotlib pandas scipy
 conda install -c conda-forge adios2 adios4dolfinx=0.9.5
 ```
 
+## File structure
+
+```
+.
+├── src/
+│   ├── default_config.py             # Default parameters, overridden by each problem's config.py
+│   ├── msh2xdmf.py                   # Imports gmsh .msh files with their physical groups
+│   ├── utils.py                      # Projection, VTU/PVD output, dotdict, logging
+│   ├── solvers.py                    # Nonlinear/linear forward solvers and optimizers (MMA, CCSA-MMA, Barzilai-Borwein)
+│   ├── neoHookean.py                 # Neo-Hookean model and basic optimization framework with Helmholtz filtering; base of all other implementations
+│   ├── neoHookean_topo_opt.py        # Adjoint-state-method-based SIMP topology optimization
+│   ├── neoHookean_tmc.py             # Third medium contact (TMC) for contact problems
+│   ├── neoHookean_incompressible.py  # Incompressible neo-Hookean variants (mixed and staggered)
+│   └── steven.py                     # pICNN-based constitutive model for digital materials and its optimization variants
+├── mesh/                             # Configuration files and gmsh meshes for each example
+├── main_*.py                         # Entry scripts for each example
+└── command_lines.sh                  # Commands used to generate the results in the paper
+```
+
+The pICNN-based constitutive model in `src/steven.py` is derived from our previous work (Steven Yang et al., [10.1016/j.ijengsci.2025.104381](https://doi.org/10.1016/j.ijengsci.2025.104381)).
+
+## Examples in the paper
+
+All commands we used to generate results in the paper are in `command_lines.sh`, which will guide you to the corresponding `main_*.py` files that define the optimization problem and logic using interfaces defined in parent classes, and also the mesh and configuration files in `mesh/` folder.
+
+* **Trapezoid**: `main_trapezoid_dist_opt.py` optimizes the material distribution of a trapezoid based on the traction on its top boundary, and can reload an optimized design to simulate its compression. Mesh: `mesh/trapezoid.geo` / `mesh/trapezoid.msh`. Configuration: `mesh/config_trapezoid.py`.
+* **Semisphere**: `main_semisphere_dist_opt_tmc.py` compresses a semisphere into contact using third medium contact, then optimizes its material distribution based on the traction on the bottom boundary. Mesh: `mesh/semisphere.geo` / `mesh/semisphere.msh`. Configuration: `mesh/config_semisphere_tmc.py`.
+* **Clamp**: `main_clamp.py` optimizes topology and material distribution of a clamp, together or separately, to maximize stored energy under displacement control, with an optional failure constraint. Mesh: none, as the rectangular mesh is generated in the configuration file. Configuration: `mesh/config_clamp.py`.
+
 ## Usage
 
 
 ### Configuration and execution
-
-All commands we used to generate results in the paper are in `command_lines.sh`, which will guide you to the corresponding `main_*.py` files that define the optimization problem and logic using interfaces defined in parent classes, and also the mesh and configuration files in `mesh/` folder. 
 
 Default parameters are in `src/default_config.py`. Write your own `config.py` to override the default parameters. Surfaces where boundary conditions are applied and domains to be designed or frozen can be either defined by lambda functions or predefined in gmsh mesh files by "Physical groups". Finally, run a main script. 
 
@@ -190,11 +217,4 @@ problem.optimize()
 ```
 
 </details>
-
-### Implemented methods
-
-* `src/neoHookean.py` implements a neo-Hookean model and a basic optimization framework with Helmholtz filtering as the foundation of all other implementations. 
-* `src/neoHookean_topo_opt.py` implements the adjoint-state-method-based SIMP topology optimization for a neo-Hookean model. 
-* `src/neoHookean_tmc.py` implements the third medium contact approach for contact problems. 
-* `src/steven.py` implements the pICNN-based constitutive model in our previous work ([10.1016/j.ijengsci.2025.104381](10.1016/j.ijengsci.2025.104381)) for digital materials. 
 
